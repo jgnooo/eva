@@ -85,6 +85,14 @@ eva::SpvBlob eva::SpvBlob::readFrom(const char* filepath)
 
 
 PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHR_ = nullptr;
+
+#ifdef EVA_ENABLE_PERFORMANCE_QUERY
+// VK_KHR_performance_query
+PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR vkEnumeratePerformanceQueryCountersKHR_ = nullptr;
+PFN_vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR vkGetPerformanceQueryPassesKHR_ = nullptr;
+PFN_vkAcquireProfilingLockKHR vkAcquireProfilingLockKHR_ = nullptr;
+PFN_vkReleaseProfilingLockKHR vkReleaseProfilingLockKHR_ = nullptr;
+#endif
 #ifdef EVA_ENABLE_RAYTRACING
     PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR_ = nullptr;
     PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR_ = nullptr;
@@ -269,7 +277,9 @@ struct Device::Impl {
     // const VkInstance vkInstance;
     const Runtime& parent;
     const DeviceSettings settings;
-
+#ifdef EVA_ENABLE_PERFORMANCE_QUERY
+    bool performanceQuerySupported = false;
+#endif
     std::set<CommandPool::Impl**> cmdPools;
     std::set<Fence::Impl**> fences;
     std::set<Semaphore::Impl**> semaphores;
@@ -283,6 +293,7 @@ struct Device::Impl {
     std::set<DescriptorSetLayout::Impl**> descSetLayouts;
     std::set<PipelineLayout::Impl**> pipelineLayouts;
     std::set<DescriptorPool::Impl**> descPools;
+    std::set<QueryPool::Impl**> queryPools;
 
 #ifdef EVA_ENABLE_RAYTRACING
     struct {
@@ -692,6 +703,38 @@ DescriptorPool::Impl::~Impl()
 }
 
 
+struct QueryPool::Impl {
+    VkDevice vkDevice;
+    VkQueryPool vkQueryPool;
+    VkQueryType type;
+    uint32_t queryCount;
+    float timestampPeriod = 0;
+    uint32_t performanceCounterCount = 0;
+
+    Impl(VkDevice vkDevice, VkQueryPool vkQueryPool, uint32_t queryCount, float timestampPeriod)
+    : vkDevice(vkDevice)
+    , vkQueryPool(vkQueryPool)
+    , type(VK_QUERY_TYPE_TIMESTAMP)
+    , queryCount(queryCount)
+    , timestampPeriod(timestampPeriod)
+    {}
+
+#ifdef EVA_ENABLE_PERFORMANCE_QUERY
+    Impl(VkDevice vkDevice, VkQueryPool vkQueryPool, uint32_t queryCount, uint32_t counterCount)
+    : vkDevice(vkDevice)
+    , vkQueryPool(vkQueryPool)
+    , type(VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR)
+    , queryCount(queryCount)
+    , performanceCounterCount(counterCount)
+    {}
+#endif
+
+    ~Impl() {
+        vkDestroyQueryPool(vkDevice, vkQueryPool, nullptr);
+    }
+};
+
+
 #ifdef EVA_ENABLE_RAYTRACING
 struct RaytracingPipeline::Impl {
     const VkDevice vkDevice;
@@ -735,7 +778,6 @@ struct AccelerationStructure::Impl {
     }
 };
 #endif
-
 
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -921,9 +963,28 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     }
 #endif
 
-    // reqExtentions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME); // deprecated, promoted to core in 1.2
-    // reqExtentions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);       // deprecated, promoted to core in 1.1
-    // reqExtentions.push_back(VK_KHR_8BIT_STORAGE_EXTENSION_NAME);        // deprecated, promoted to core in 1.2
+#ifdef EVA_ENABLE_PERFORMANCE_QUERY
+    // Optional: VK_KHR_performance_query
+    bool hasPerfQueryExt = deviceSupportsExtensions(pd, {VK_KHR_PERFORMANCE_QUERY_EXTENSION_NAME});
+    bool performanceQuerySupported = false;
+    if (hasPerfQueryExt)
+    {
+        VkPhysicalDevicePerformanceQueryFeaturesKHR perfFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PERFORMANCE_QUERY_FEATURES_KHR,
+        };
+        VkPhysicalDeviceFeatures2 features2{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &perfFeatures,
+        };
+        vkGetPhysicalDeviceFeatures2(pd, &features2);
+        performanceQuerySupported = perfFeatures.performanceCounterQueryPools;
+    }
+
+    if (performanceQuerySupported)
+    {
+        reqExtentions.push_back(VK_KHR_PERFORMANCE_QUERY_EXTENSION_NAME);
+    }
+#endif
 
     if (!deviceSupportsExtensions(pd, reqExtentions))
     {
@@ -1112,6 +1173,21 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .storageBuffer16BitAccess = VK_TRUE,
         });
 
+        chain.add(VkPhysicalDeviceHostQueryResetFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES,
+            .hostQueryReset = VK_TRUE,
+        });
+
+#ifdef EVA_ENABLE_PERFORMANCE_QUERY
+        if (performanceQuerySupported)
+        {
+            chain.add(VkPhysicalDevicePerformanceQueryFeaturesKHR{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PERFORMANCE_QUERY_FEATURES_KHR,
+                .performanceCounterQueryPools = VK_TRUE,
+            });
+        }
+#endif
+
 #ifdef EVA_ENABLE_RAYTRACING
         if (settings.enableRaytracing)
         {
@@ -1207,6 +1283,22 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     }
 #endif
 
+#ifdef EVA_ENABLE_PERFORMANCE_QUERY
+    // VK_KHR_performance_query function pointers
+    if (performanceQuerySupported)
+    {
+        pImpl->performanceQuerySupported = true;
+        vkEnumeratePerformanceQueryCountersKHR_ = (PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR)
+            vkGetInstanceProcAddr(impl().instance, "vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR");
+        vkGetPerformanceQueryPassesKHR_ = (PFN_vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR)
+            vkGetInstanceProcAddr(impl().instance, "vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR");
+        vkAcquireProfilingLockKHR_ = (PFN_vkAcquireProfilingLockKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkAcquireProfilingLockKHR");
+        vkReleaseProfilingLockKHR_ = (PFN_vkReleaseProfilingLockKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkReleaseProfilingLockKHR");
+    }
+#endif
+
     return impl().devices.emplace_back(new Device::Impl*(pImpl));
 }
 
@@ -1251,6 +1343,7 @@ Device::Impl::~Impl()
     deleter(descSetLayouts);
     deleter(pipelineLayouts);
     deleter(descPools);
+    deleter(queryPools);
 
 #ifdef EVA_ENABLE_RAYTRACING
     deleter(raytracingPipelines);
@@ -2222,6 +2315,36 @@ CommandBuffer CommandBuffer::dispatch(uint32_t groupCountX, uint32_t groupCountY
 {
     EVA_ASSERT(type() <= queue_compute);  // VUID-vkCmdDispatch-commandBuffer-cmdpool (Implicit)
     vkCmdDispatch(impl().vkCmdBuffer, groupCountX, groupCountY, groupCountZ);
+    return *this;
+}
+
+CommandBuffer CommandBuffer::resetQueryPool(QueryPool pool, uint32_t firstQuery, uint32_t queryCount)
+{
+    if (queryCount == 0)
+        queryCount = pool.queryCount() - firstQuery;
+    vkCmdResetQueryPool(impl().vkCmdBuffer, pool.impl().vkQueryPool, firstQuery, queryCount);
+    return *this;
+}
+
+CommandBuffer CommandBuffer::writeTimestamp(PIPELINE_STAGE stage, QueryPool pool, uint32_t query)
+{
+    vkCmdWriteTimestamp(
+        impl().vkCmdBuffer,
+        (VkPipelineStageFlagBits)(uint64_t)stage,
+        pool.impl().vkQueryPool,
+        query);
+    return *this;
+}
+
+CommandBuffer CommandBuffer::beginQuery(QueryPool pool, uint32_t query)
+{
+    vkCmdBeginQuery(impl().vkCmdBuffer, pool.impl().vkQueryPool, query, 0);
+    return *this;
+}
+
+CommandBuffer CommandBuffer::endQuery(QueryPool pool, uint32_t query)
+{
+    vkCmdEndQuery(impl().vkCmdBuffer, pool.impl().vkQueryPool, query);
     return *this;
 }
 
@@ -3461,6 +3584,182 @@ DescriptorSet DescriptorSet::operator=(std::vector<DescriptorSet>&& data)
 }
 
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// QueryPool
+/////////////////////////////////////////////////////////////////////////////////////////
+bool Device::supportsTimestampQueries() const
+{
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(impl().vkPhysicalDevice, &props);
+    return props.limits.timestampComputeAndGraphics == VK_TRUE;
+}
+
+QueryPool Device::createTimestampQueryPool(uint32_t queryCount)
+{
+    auto vkHandle = create<VkQueryPool>(impl().vkDevice, {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = queryCount,
+    });
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(impl().vkPhysicalDevice, &props);
+
+    auto pImpl = new QueryPool::Impl(
+        impl().vkDevice,
+        vkHandle,
+        queryCount,
+        props.limits.timestampPeriod);
+
+    return *impl().queryPools.insert(new QueryPool::Impl*(pImpl)).first;
+}
+
+uint32_t QueryPool::queryCount() const
+{
+    return impl().queryCount;
+}
+
+void QueryPool::reset(uint32_t firstQuery, uint32_t queryCount)
+{
+    if (queryCount == 0)
+        queryCount = impl().queryCount - firstQuery;
+    vkResetQueryPool(impl().vkDevice, impl().vkQueryPool, firstQuery, queryCount);
+}
+
+std::vector<uint64_t> QueryPool::getResults(uint32_t firstQuery, uint32_t queryCount)
+{
+    if (queryCount == 0)
+        queryCount = impl().queryCount - firstQuery;
+
+    auto stride = (impl().type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR) ?
+        impl().performanceCounterCount * sizeof(uint64_t) : sizeof(uint64_t);
+    VkQueryResultFlags addFlags = (impl().type == VK_QUERY_TYPE_TIMESTAMP) ? VK_QUERY_RESULT_64_BIT : 0;
+
+    std::vector<uint64_t> results(queryCount * stride / sizeof(uint64_t));
+    vkGetQueryPoolResults(
+        impl().vkDevice,
+        impl().vkQueryPool,
+        firstQuery,
+        queryCount,
+        queryCount * stride,
+        results.data(),
+        stride,
+        VK_QUERY_RESULT_WAIT_BIT | addFlags
+    );
+    return results;
+}
+
+double QueryPool::getElapsedMs(uint32_t startQuery, uint32_t endQuery)
+{
+    EVA_ASSERT(impl().type == VK_QUERY_TYPE_TIMESTAMP);
+    auto results = getResults(startQuery, endQuery - startQuery + 1);
+    if (results.size() < 2) return 0.0;
+
+    uint64_t elapsed = results.back() - results.front();
+    return static_cast<double>(elapsed) * impl().timestampPeriod / 1e6;
+}
+
+#ifdef EVA_ENABLE_PERFORMANCE_QUERY
+bool Device::supportsPerformanceQueries() const
+{
+    return impl().performanceQuerySupported;
+}
+
+std::vector<PerformanceCounter> Device::enumeratePerformanceCounters(QueueType type) const
+{
+    EVA_ASSERT(impl().performanceQuerySupported);
+    uint32_t qfIdx = impl().qfIndex[type];
+    EVA_ASSERT(qfIdx != uint32_t(-1));
+
+    uint32_t count = 0;
+    vkEnumeratePerformanceQueryCountersKHR_(impl().vkPhysicalDevice, qfIdx, &count, nullptr, nullptr);
+
+    std::vector<VkPerformanceCounterKHR> vkCounters(count, {
+        .sType = VK_STRUCTURE_TYPE_PERFORMANCE_COUNTER_KHR,
+    });
+    std::vector<VkPerformanceCounterDescriptionKHR> vkDescs(count, {
+        .sType = VK_STRUCTURE_TYPE_PERFORMANCE_COUNTER_DESCRIPTION_KHR,
+    });
+    vkEnumeratePerformanceQueryCountersKHR_(impl().vkPhysicalDevice, qfIdx, &count, vkCounters.data(), vkDescs.data());
+
+    std::vector<PerformanceCounter> result(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        result[i].name        = vkDescs[i].name;
+        result[i].category    = vkDescs[i].category;
+        result[i].description = vkDescs[i].description;
+        result[i].unit        = (PERFORMANCE_COUNTER_UNIT)vkCounters[i].unit;
+        result[i].storage     = (PERFORMANCE_COUNTER_STORAGE)vkCounters[i].storage;
+        result[i].scope       = (PERFORMANCE_COUNTER_SCOPE)vkCounters[i].scope;
+        result[i].flags       = (PERFORMANCE_COUNTER_DESCRIPTION)vkDescs[i].flags;
+    }
+    return result;
+}
+
+uint32_t Device::getPerformanceQueryPasses(QueueType type, const std::vector<uint32_t>& counterIndices) const
+{
+    EVA_ASSERT(impl().performanceQuerySupported);
+    uint32_t qfIdx = impl().qfIndex[type];
+
+    VkQueryPoolPerformanceCreateInfoKHR perfCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_PERFORMANCE_CREATE_INFO_KHR,
+        .queueFamilyIndex = qfIdx,
+        .counterIndexCount = (uint32_t)counterIndices.size(),
+        .pCounterIndices = counterIndices.data(),
+    };
+
+    uint32_t numPasses = 0;
+    vkGetPerformanceQueryPassesKHR_(impl().vkPhysicalDevice, &perfCreateInfo, &numPasses);
+    return numPasses;
+}
+
+QueryPool Device::createPerformanceQueryPool(
+    QueueType type, 
+    const std::vector<uint32_t>& counterIndices,
+    uint32_t queryCount)
+{
+    EVA_ASSERT(impl().performanceQuerySupported);
+    uint32_t qfIdx = impl().qfIndex[type];
+
+    VkQueryPoolPerformanceCreateInfoKHR perfCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_PERFORMANCE_CREATE_INFO_KHR,
+        .queueFamilyIndex = qfIdx,
+        .counterIndexCount = (uint32_t)counterIndices.size(),
+        .pCounterIndices = counterIndices.data(),
+    };
+
+    auto vkHandle = create<VkQueryPool>(impl().vkDevice, {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .pNext = &perfCreateInfo,
+        .queryType = VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR,
+        .queryCount = queryCount,
+    });
+
+    auto pImpl = new QueryPool::Impl(
+        impl().vkDevice,
+        vkHandle,
+        queryCount,
+        (uint32_t)counterIndices.size());
+
+    return *impl().queryPools.insert(new QueryPool::Impl*(pImpl)).first;
+}
+
+void Device::acquireProfilingLock(uint64_t timeout)
+{
+    EVA_ASSERT(impl().performanceQuerySupported);
+    VkAcquireProfilingLockInfoKHR lockInfo = {
+        .sType = VK_STRUCTURE_TYPE_ACQUIRE_PROFILING_LOCK_INFO_KHR,
+        .timeout = timeout,
+    };
+    ASSERT_SUCCESS(vkAcquireProfilingLockKHR_(impl().vkDevice, &lockInfo));
+}
+
+void Device::releaseProfilingLock()
+{
+    EVA_ASSERT(impl().performanceQuerySupported);
+    vkReleaseProfilingLockKHR_(impl().vkDevice);
+}
+#endif
+
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // Window
@@ -4595,6 +4894,7 @@ DESTROY_MACRO(DescriptorSetLayout)
 DESTROY_MACRO(PipelineLayout)
 DESTROY_MACRO(DescriptorPool)
 DESTROY_MACRO(DescriptorSet)
+DESTROY_MACRO(QueryPool)
 #ifdef EVA_ENABLE_WINDOW
     DESTROY_MACRO(Window)
 #endif
