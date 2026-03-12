@@ -1141,38 +1141,45 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         });
 
+        // Provided by VK_VERSION_1_3
         chain.add(VkPhysicalDeviceSynchronization2Features{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
             .synchronization2 = VK_TRUE,
         });
-    
+
+        // Provided by VK_EXT_shader_atomic_float
         chain.add(VkPhysicalDeviceShaderAtomicFloatFeaturesEXT{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
             .shaderBufferFloat32AtomicAdd = VK_TRUE,
             //.shaderSharedFloat32AtomicAdd = VK_TRUE,
         });
 
+        // Provided by VK_EXT_robustness2
         chain.add(VkPhysicalDeviceRobustness2FeaturesEXT{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
             .nullDescriptor = VK_TRUE,
         });
 
+        // Provided by VK_EXT_graphics_pipeline_library
         chain.add(VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
             .graphicsPipelineLibrary = VK_TRUE,
         });
 
+        // Provided by VK_VERSION_1_2
         chain.add(VkPhysicalDeviceShaderFloat16Int8Features{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
             .shaderFloat16 = VK_TRUE,
             // .shaderInt8 = VK_TRUE,
         });
 
+        // Provided by VK_VERSION_1_1
         chain.add(VkPhysicalDevice16BitStorageFeatures{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
             .storageBuffer16BitAccess = VK_TRUE,
         });
 
+        // Provided by VK_VERSION_1_2
         chain.add(VkPhysicalDeviceHostQueryResetFeatures{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES,
             .hostQueryReset = VK_TRUE,
@@ -1181,6 +1188,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         if (performanceQuerySupported)
         {
+            // Provided by VK_KHR_performance_query
             chain.add(VkPhysicalDevicePerformanceQueryFeaturesKHR{
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PERFORMANCE_QUERY_FEATURES_KHR,
                 .performanceCounterQueryPools = VK_TRUE,
@@ -1191,14 +1199,19 @@ Device Runtime::createDevice(const DeviceSettings& settings)
 #ifdef EVA_ENABLE_RAYTRACING
         if (settings.enableRaytracing)
         {
+            // Provided by VK_VERSION_1_2
             chain.add(VkPhysicalDeviceBufferDeviceAddressFeatures{
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
                 .bufferDeviceAddress = VK_TRUE,
             });
+
+            // Provided by VK_KHR_acceleration_structure
             chain.add(VkPhysicalDeviceAccelerationStructureFeaturesKHR{
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
                 .accelerationStructure = VK_TRUE,
             });
+
+            // Provided by VK_KHR_ray_tracing_pipeline
             chain.add(VkPhysicalDeviceRayTracingPipelineFeaturesKHR{
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
                 .rayTracingPipeline = VK_TRUE,
