@@ -1047,8 +1047,8 @@ struct ShaderStage {
     ShaderStage(ShaderType shader, SpecializationConstant&& spec ={})
     : shader(shader), specialization(std::move(spec)) {}
 
-    template<int ID, typename T>
-    ShaderStage operator+(ConstantID<ID, T> constant) && 
+    template<uint32_t ID, typename T>
+    ShaderStage operator+(ConstantID<ID, T> constant) &&
     {
         specialization.addConstant(constant);
         return std::move(*this);
@@ -1058,8 +1058,8 @@ struct ShaderStage {
 };
 
 
-template<int ID, typename T>
-inline ShaderStage operator+(ShaderInput shader, ConstantID<ID, T> constant) 
+template<uint32_t ID, typename T>
+inline ShaderStage operator+(ShaderInput shader, ConstantID<ID, T> constant)
 {
     return ShaderStage(shader) + constant;
 }
