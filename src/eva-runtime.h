@@ -306,6 +306,23 @@ public:
     PipelineLayout createPipelineLayout(PipelineLayoutDesc desc);
     DescriptorPool createDescriptorPool(const DescriptorPoolCreateInfo& info);
 
+    // ----- Cooperative matrix capability (queried once at device creation) -----
+    // Member order mirrors VkCooperativeMatrixPropertiesKHR (minus sType/pNext).
+    struct CooperativeMatrixProperties {
+        uint32_t       M, N, K;
+        COMPONENT_TYPE aType, bType, cType, resultType;
+        bool           saturatingAccumulation;
+        SCOPE          scope;
+    };
+
+    // True if the cooperativeMatrix (+ vulkanMemoryModel) feature was enabled.
+    // Inspect cooperativeMatrixProperties() for a shape the kernel can use.
+    bool supportsCooperativeMatrix() const;
+    // Every cooperative-matrix shape reported by the device (all type combos).
+    const std::vector<CooperativeMatrixProperties>& cooperativeMatrixProperties() const;
+    // Device subgroup size (VkPhysicalDeviceSubgroupProperties.subgroupSize).
+    uint32_t subgroupSize() const;
+
     // Timestamp Query Pool
     bool supportsTimestampQueries() const;
     QueryPool createTimestampQueryPool(uint32_t queryCount);

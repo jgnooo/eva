@@ -619,6 +619,36 @@ DEFINE_OPERATOR_OR(PERFORMANCE_COUNTER_DESCRIPTION)
 DEFINE_HAS_FLAGS(PERFORMANCE_COUNTER_DESCRIPTION)
 
 
+enum class COMPONENT_TYPE : uint32_t {
+    FLOAT16      = 0,
+    FLOAT32      = 1,
+    FLOAT64      = 2,
+    SINT8        = 3,
+    SINT16       = 4,
+    SINT32       = 5,
+    SINT64       = 6,
+    UINT8        = 7,
+    UINT16       = 8,
+    UINT32       = 9,
+    UINT64       = 10,
+    BFLOAT16     = 1000141000,
+    SINT8_PACKED = 1000491000,
+    UINT8_PACKED = 1000491001,
+    FLOAT_E4M3   = 1000491002,
+    FLOAT_E5M2   = 1000491003,
+    MAX_ENUM     = 0x7FFFFFFF,
+};
+
+
+enum class SCOPE : uint32_t {
+    DEVICE       = 1,
+    WORKGROUP    = 2,
+    SUBGROUP     = 3,
+    QUEUE_FAMILY = 5,
+    MAX_ENUM     = 0x7FFFFFFF,
+};
+
+
 enum class GEOMETRY_TYPE : uint32_t {
     TRIANGLES   = 0,
     AABBS       = 1,

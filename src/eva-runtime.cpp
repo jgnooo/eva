@@ -273,7 +273,11 @@ struct Device::Impl {
         bool shaderFloat16 = false;
         bool storageBuffer16BitAccess = false;
         bool shaderBufferFloat32AtomicAdd = false;
-        
+
+        bool cooperativeMatrix = false;
+        bool vulkanMemoryModel = false;
+        bool maintenance4 = false;
+
         bool hostQueryReset = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         bool performanceCounterQueryPools = false;
@@ -315,6 +319,15 @@ struct Device::Impl {
 
 
     std::vector<const char*> enabledExtensions;
+
+    // Cooperative matrix shapes the device reports (all type combinations),
+    // queried once at device creation. Whether cooperative matrix is usable at
+    // all is tracked separately by features.cooperativeMatrix.
+    struct {
+        std::vector<Device::CooperativeMatrixProperties> shapes;
+    } coopMat;
+
+    uint32_t subgroupSize = 0;   // VkPhysicalDeviceSubgroupProperties.subgroupSize
 
     CommandPool defaultCmdPool[queue_max][8] = {};
 
@@ -988,6 +1001,22 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
         });
 
+    // Provided by VK_KHR_cooperative_matrix
+    auto* qCoopMat = !supportsExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDeviceCooperativeMatrixFeaturesKHR{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        });
+
+    // Provided by VK_VERSION_1_2 (required by cooperative matrix's GL_KHR_memory_scope_semantics / VulkanMemoryModel capability)
+    auto& qMemModel = queryChain.add(VkPhysicalDeviceVulkanMemoryModelFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES,
+    });
+
+    // Provided by VK_VERSION_1_3 (required for SPIR-V LocalSizeId, i.e. a spec-constant local_size_*_id — used by vai-linear-cm)
+    auto& qMaint4 = queryChain.add(VkPhysicalDeviceMaintenance4Features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES,
+    });
+
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
     // Provided by VK_KHR_performance_query
     auto* qPerfQuery = !supportsExt(VK_KHR_PERFORMANCE_QUERY_EXTENSION_NAME)
@@ -1097,6 +1126,36 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             });
             enabledFeatures.graphicsPipelineLibrary = true;
         }
+    }
+
+    // Provided by VK_KHR_cooperative_matrix.
+    // The shader's GL_KHR_memory_scope_semantics requires the Vulkan memory
+    // model, so enable both together or neither.
+    if (qCoopMat && qCoopMat->cooperativeMatrix && qMemModel.vulkanMemoryModel)
+    {
+        reqExtentions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+
+        chain.add(VkPhysicalDeviceCooperativeMatrixFeaturesKHR{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+            .cooperativeMatrix = VK_TRUE,
+        });
+        enabledFeatures.cooperativeMatrix = true;
+
+        chain.add(VkPhysicalDeviceVulkanMemoryModelFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES,
+            .vulkanMemoryModel = VK_TRUE,
+        });
+        enabledFeatures.vulkanMemoryModel = true;
+    }
+
+    // Provided by VK_VERSION_1_3 (enables SPIR-V LocalSizeId / local_size_*_id)
+    if (qMaint4.maintenance4)
+    {
+        chain.add(VkPhysicalDeviceMaintenance4Features{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES,
+            .maintenance4 = VK_TRUE,
+        });
+        enabledFeatures.maintenance4 = true;
     }
 
     // Provided by VK_VERSION_1_2
@@ -1394,6 +1453,56 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         throw std::runtime_error("The selected physical device does not support synchronization2 feature, which is required by the runtime.");
     }
 
+    // Cache the device subgroup size (Vulkan 1.1 core).
+    {
+        VkPhysicalDeviceSubgroupProperties subgroupProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+        };
+        VkPhysicalDeviceProperties2 props2{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &subgroupProps,
+        };
+        vkGetPhysicalDeviceProperties2(pd, &props2);
+        pImpl->subgroupSize = subgroupProps.subgroupSize;
+    }
+
+    // Cache every cooperative-matrix shape the device reports.
+    if (enabledFeatures.cooperativeMatrix)
+    {
+        auto pfnGetCoopMatProps = (PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)
+            vkGetInstanceProcAddr(impl().instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+
+        if (pfnGetCoopMatProps)
+        {
+            uint32_t count = 0;
+            pfnGetCoopMatProps(pd, &count, nullptr);
+
+            std::vector<VkCooperativeMatrixPropertiesKHR> cmProps(count, {
+                .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+            });
+            pfnGetCoopMatProps(pd, &count, cmProps.data());
+
+            // eva's COMPONENT_TYPE / SCOPE mirror the Vulkan enum values, so a
+            // plain cast is exact.
+            pImpl->coopMat.shapes.reserve(count);
+            for (const auto& p : cmProps)
+            {
+                Device::CooperativeMatrixProperties s{
+                    .M = p.MSize, 
+                    .N = p.NSize, 
+                    .K = p.KSize,
+                    .aType      = static_cast<COMPONENT_TYPE>(p.AType),
+                    .bType      = static_cast<COMPONENT_TYPE>(p.BType),
+                    .cType      = static_cast<COMPONENT_TYPE>(p.CType),
+                    .resultType = static_cast<COMPONENT_TYPE>(p.ResultType),
+                    .saturatingAccumulation = (p.saturatingAccumulation == VK_TRUE),
+                    .scope      = static_cast<SCOPE>(p.scope),
+                };
+                pImpl->coopMat.shapes.push_back(s);
+            }
+        }
+    }
+
 #ifdef EVA_ENABLE_RAYTRACING
     if (settings.enableRaytracing)
     {
@@ -1570,6 +1679,21 @@ std::vector<CommandBuffer> Device::newCommandBuffers(uint32_t count, QueueType t
         impl().defaultCmdPool[type][(uint32_t)poolFlags] = createCommandPool(type, poolFlags);
 
     return impl().defaultCmdPool[type][(uint32_t)poolFlags].newCommandBuffers(count);
+}
+
+bool Device::supportsCooperativeMatrix() const
+{
+    return impl().features.cooperativeMatrix;
+}
+
+const std::vector<Device::CooperativeMatrixProperties>& Device::cooperativeMatrixProperties() const
+{
+    return impl().coopMat.shapes;
+}
+
+uint32_t Device::subgroupSize() const
+{
+    return impl().subgroupSize;
 }
 
 
