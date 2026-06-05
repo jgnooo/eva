@@ -138,7 +138,19 @@ struct MemoryBarrier;
 struct BufferMemoryBarrier;
 struct ImageMemoryBarrier;
 
-struct CopyRegion;
+struct CopyRegion {
+    uint64_t bufferOffset=0;
+    uint32_t bufferRowLength=0;
+    uint32_t bufferImageHeight=0;
+    uint32_t offsetX=0;
+    uint32_t offsetY=0;
+    uint32_t offsetZ=0;
+    uint32_t baseLayer=0;
+    uint32_t width=0;
+    uint32_t height=0;
+    uint32_t depth=0;
+    uint32_t layerCount=0;
+};
 struct WindowCreateInfo;
 
 
@@ -289,13 +301,6 @@ public:
     Result waitFences(std::vector<Fence> fences, bool waitAll, uint64_t timeout=uint64_t(-1));
     void resetFences(std::vector<Fence> fences);
     Semaphore createSemaphore();
-    template <int N> auto createSemaphores()
-    {
-        return [this]<std::size_t... I>(std::index_sequence<I...>) {
-            return std::make_tuple(((void)I, createSemaphore())...);
-        }(std::make_index_sequence<N>{});
-    }
-
     ShaderModule createShaderModule(const ShaderModuleCreateInfo& info);
     ComputePipeline createComputePipeline(const ComputePipelineCreateInfo& info);
 
@@ -691,14 +696,7 @@ public:
     );
 
     template<typename... Layouts>
-    auto operator()(Layouts... layouts) requires (std::is_same_v<Layouts, DescriptorSetLayout> && ...)
-    {
-        auto sets = (*this)(std::vector<DescriptorSetLayout>{ layouts... });
-
-        return [&]<std::size_t... I>(std::index_sequence<I...>) {
-            return std::make_tuple(sets[I]...);
-        }(std::index_sequence_for<Layouts...>{});
-    }
+    auto operator()(Layouts... layouts) requires (std::is_same_v<Layouts, DescriptorSetLayout> && ...);
 };
 
 
@@ -722,9 +720,19 @@ inline DescriptorSet DescriptorPool::operator()(DescriptorSetLayout layout)
     return (*this)(std::vector<DescriptorSetLayout>{layout})[0];
 }
 
-inline std::vector<DescriptorSet> DescriptorPool::operator()(DescriptorSetLayout layout, uint32_t count) 
+inline std::vector<DescriptorSet> DescriptorPool::operator()(DescriptorSetLayout layout, uint32_t count)
 {
     return (*this)(std::vector<DescriptorSetLayout>(count, layout));
+}
+
+template<typename... Layouts>
+auto DescriptorPool::operator()(Layouts... layouts) requires (std::is_same_v<Layouts, DescriptorSetLayout> && ...)
+{
+    auto sets = (*this)(std::vector<DescriptorSetLayout>{ layouts... });
+
+    return [&]<std::size_t... I>(std::index_sequence<I...>) {
+        return std::make_tuple(sets[I]...);
+    }(std::index_sequence_for<Layouts...>{});
 }
 
 
@@ -914,21 +922,6 @@ inline std::vector<DescriptorSet> operator,(DescriptorSet lhs, DescriptorSet rhs
     return {lhs, rhs};
 }
 
-
-
-struct CopyRegion {
-    uint64_t bufferOffset=0;
-    uint32_t bufferRowLength=0;
-    uint32_t bufferImageHeight=0;
-    uint32_t offsetX=0;
-    uint32_t offsetY=0;
-    uint32_t offsetZ=0;
-    uint32_t baseLayer=0;
-    uint32_t width=0; 
-    uint32_t height=0; 
-    uint32_t depth=0;
-    uint32_t layerCount=0;
-};
 
 
 struct SpvBlob {
