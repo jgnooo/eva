@@ -2526,7 +2526,71 @@ CommandBuffer CommandBuffer::copyImage(
         (uint32_t)copyRegions.size(),
         copyRegions.data()
     );
-    
+
+    return *this;
+}
+
+CommandBuffer CommandBuffer::blitImage(
+    Image src, Image dst, std::vector<BlitRegion> regions, FILTER filter)
+{
+    EVA_ASSERT((uint32_t)src.impl().usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    EVA_ASSERT((uint32_t)dst.impl().usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (regions.empty())
+        regions.push_back({});
+
+    std::vector<VkImageBlit> blitRegions;
+    blitRegions.reserve(regions.size());
+
+    for (const auto& r : regions)
+    {
+        // 0 extent means "to the edge"; for 2D images depth resolves to 1.
+        uint32_t srcW = r.srcWidth  ? r.srcWidth  : src.impl().width  - (uint32_t)r.srcOffsetX;
+        uint32_t srcH = r.srcHeight ? r.srcHeight : src.impl().height - (uint32_t)r.srcOffsetY;
+        uint32_t srcD = r.srcDepth  ? r.srcDepth  : src.impl().depth  - (uint32_t)r.srcOffsetZ;
+        uint32_t dstW = r.dstWidth  ? r.dstWidth  : dst.impl().width  - (uint32_t)r.dstOffsetX;
+        uint32_t dstH = r.dstHeight ? r.dstHeight : dst.impl().height - (uint32_t)r.dstOffsetY;
+        uint32_t dstD = r.dstDepth  ? r.dstDepth  : dst.impl().depth  - (uint32_t)r.dstOffsetZ;
+
+        EVA_ASSERT(r.srcOffsetX + (int32_t)srcW <= (int32_t)src.impl().width);
+        EVA_ASSERT(r.srcOffsetY + (int32_t)srcH <= (int32_t)src.impl().height);
+        EVA_ASSERT(r.dstOffsetX + (int32_t)dstW <= (int32_t)dst.impl().width);
+        EVA_ASSERT(r.dstOffsetY + (int32_t)dstH <= (int32_t)dst.impl().height);
+
+        blitRegions.emplace_back(VkImageBlit{
+            .srcSubresource = {
+                .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,    // TODO: support depth/stencil
+                .mipLevel       = 0,                            // TODO: support mipmap levels
+                .baseArrayLayer = r.baseLayer,
+                .layerCount     = r.layerCount ? r.layerCount : src.impl().arrayLayers - r.baseLayer,
+            },
+            .srcOffsets = {
+                { r.srcOffsetX, r.srcOffsetY, r.srcOffsetZ },
+                { r.srcOffsetX + (int32_t)srcW, r.srcOffsetY + (int32_t)srcH, r.srcOffsetZ + (int32_t)srcD },
+            },
+            .dstSubresource = {
+                .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,    // TODO: support depth/stencil
+                .mipLevel       = 0,                            // TODO: support mipmap levels
+                .baseArrayLayer = r.baseLayer,
+                .layerCount     = r.layerCount ? r.layerCount : dst.impl().arrayLayers - r.baseLayer,
+            },
+            .dstOffsets = {
+                { r.dstOffsetX, r.dstOffsetY, r.dstOffsetZ },
+                { r.dstOffsetX + (int32_t)dstW, r.dstOffsetY + (int32_t)dstH, r.dstOffsetZ + (int32_t)dstD },
+            },
+        });
+    }
+
+    vkCmdBlitImage(
+        impl().vkCmdBuffer,
+        src.impl().vkImage,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,   // src must be in this layout
+        dst.impl().vkImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,   // dst must be in this layout
+        (uint32_t)blitRegions.size(),
+        blitRegions.data(),
+        (VkFilter)(uint32_t)filter
+    );
+
     return *this;
 }
 

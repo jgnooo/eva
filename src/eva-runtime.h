@@ -151,6 +151,17 @@ struct CopyRegion {
     uint32_t depth=0;
     uint32_t layerCount=0;
 };
+
+// Source and destination rectangles for blitImage (may differ in size -> scaled).
+// A zero extent means "to the edge of the image" (full image when offset is 0).
+struct BlitRegion {
+    int32_t  srcOffsetX=0, srcOffsetY=0, srcOffsetZ=0;
+    uint32_t srcWidth=0,   srcHeight=0,  srcDepth=0;   // 0 -> rest of src
+    int32_t  dstOffsetX=0, dstOffsetY=0, dstOffsetZ=0;
+    uint32_t dstWidth=0,   dstHeight=0,  dstDepth=0;   // 0 -> rest of dst
+    uint32_t baseLayer=0;
+    uint32_t layerCount=0;                             // 0 -> all layers
+};
 struct WindowCreateInfo;
 
 
@@ -496,6 +507,15 @@ public:
         Image src,
         Image dst,
         std::vector<CopyRegion> regions = {}
+    );
+
+    // Scaled/filtered image copy (vkCmdBlitImage). With no regions, the whole src
+    // image is blitted onto the whole dst image (handles differing resolutions).
+    CommandBuffer blitImage(
+        Image src,
+        Image dst,
+        std::vector<BlitRegion> regions = {},
+        FILTER filter = FILTER::LINEAR
     );
 
     CommandBuffer copyBufferToImage(
