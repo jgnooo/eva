@@ -21,6 +21,7 @@ option(EVA_BUILD_SAMPLES "Build EVA sample projects" OFF)
 option(EVA_ENABLE_WINDOW "Enable window support" OFF)
 option(EVA_ENABLE_RAYTRACING "Enable raytracing support" OFF)
 option(EVA_ENABLE_PERFORMANCE_QUERY "Enable performance query support" OFF)
+option(EVA_ENABLE_IMGUI "Enable Dear ImGui integration (requires EVA_ENABLE_WINDOW)" OFF)
 
 # Find Vulkan
 find_package(Vulkan REQUIRED)
@@ -71,6 +72,38 @@ endif()
 
 
 ################################################################################
+# Dear ImGui (optional integration)
+################################################################################
+if(EVA_ENABLE_IMGUI)
+    if(NOT EVA_ENABLE_WINDOW)
+        message(FATAL_ERROR "[EVA] EVA_ENABLE_IMGUI requires EVA_ENABLE_WINDOW=ON")
+    endif()
+    if(NOT TARGET imgui)
+        message(STATUS "[EVA] Configuring Dear ImGui...")
+        set(EVA_IMGUI_DIR ${EVA_EXTERNAL_DIR}/imgui)
+        add_library(imgui STATIC
+            ${EVA_IMGUI_DIR}/imgui.cpp
+            ${EVA_IMGUI_DIR}/imgui_demo.cpp
+            ${EVA_IMGUI_DIR}/imgui_draw.cpp
+            ${EVA_IMGUI_DIR}/imgui_tables.cpp
+            ${EVA_IMGUI_DIR}/imgui_widgets.cpp
+            ${EVA_IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+            ${EVA_IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+        )
+        target_include_directories(imgui PUBLIC
+            ${EVA_IMGUI_DIR}
+            ${EVA_IMGUI_DIR}/backends
+            ${Vulkan_INCLUDE_DIRS}
+        )
+        target_link_libraries(imgui PUBLIC glfw ${Vulkan_LIBRARIES})
+        message(STATUS "[EVA] Dear ImGui configuration completed.")
+    else()
+        message(STATUS "[EVA] Using existing imgui target")
+    endif()
+endif()
+
+
+################################################################################
 # EVA Library
 ################################################################################
 # Create static library
@@ -103,6 +136,12 @@ PRIVATE
 if(EVA_ENABLE_WINDOW)
     target_compile_definitions(eva PUBLIC EVA_ENABLE_WINDOW)
     target_link_libraries(eva PRIVATE glfw)
+endif()
+
+# Dear ImGui integration (PUBLIC: eva-runtime.cpp + consumers both use ImGui headers)
+if(EVA_ENABLE_IMGUI)
+    target_compile_definitions(eva PUBLIC EVA_ENABLE_IMGUI)
+    target_link_libraries(eva PUBLIC imgui)
 endif()
 
 # Android

@@ -1741,6 +1741,13 @@ public:
     void setKeyCallback(void (*callback)(int key, int action, int mods));
     void setCursorPosCallback(void (*callback)(double xpos, double ypos));
     void setScrollCallback(void (*callback)(double xoffset, double yoffset));
+
+#ifdef EVA_ENABLE_IMGUI
+    void initImGui(Device device) const;
+    void newImGuiFrame() const;
+    void renderImGui(CommandBuffer cmd, Image target) const;
+    void shutdownImGui() const;
+#endif // EVA_ENABLE_IMGUI
 };
 #endif // EVA_ENABLE_WINDOW
 

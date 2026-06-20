@@ -273,6 +273,7 @@ struct Device::Impl {
 
     struct Features {
         bool synchronization2 = false;
+        bool dynamicRendering = false;
         bool nullDescriptor = false;
         bool graphicsPipelineLibrary = false;
 
@@ -973,7 +974,12 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto& qSync2 = queryChain.add(VkPhysicalDeviceSynchronization2Features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
     });
-    
+
+    // Provided by VK_VERSION_1_3 (required by dynamic rendering: graphics passes, ImGui)
+    auto& qDynRender = queryChain.add(VkPhysicalDeviceDynamicRenderingFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+    });
+
     // Provided by VK_VERSION_1_2
     auto& qFloat16Int8 = queryChain.add(VkPhysicalDeviceShaderFloat16Int8Features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
@@ -1086,6 +1092,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .synchronization2 = VK_TRUE,
         });
         enabledFeatures.synchronization2 = true;
+    }
+
+    // Provided by VK_VERSION_1_3 (dynamic rendering: required by graphics passes and ImGui)
+    if (qDynRender.dynamicRendering)
+    {
+        chain.add(VkPhysicalDeviceDynamicRenderingFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+            .dynamicRendering = VK_TRUE,
+        });
+        enabledFeatures.dynamicRendering = true;
     }
 
     // Provided by VK_EXT_shader_atomic_float
@@ -4288,13 +4304,16 @@ vkAcquireNextImageKHR must return in finite time with an allowed VkResult code.
 uint32_t Window::acquireNextImageIndex(Semaphore onNextScImageWritable) const
 {
     uint32_t imageIndex = 0;
-    ASSERT_SUCCESS(vkAcquireNextImageKHR(
+    VkResult res = vkAcquireNextImageKHR(
         impl().vkDevice,
         impl().vkSwapchain,
         UINT64_MAX,         // no timeout for simplicity
         onNextScImageWritable.impl().vkSemaphore,
         VK_NULL_HANDLE,     // no fence for simplicity
-        &imageIndex));
+        &imageIndex);
+
+    if (res != VK_SUBOPTIMAL_KHR)
+        ASSERT_SUCCESS(res);
 
     return imageIndex;
 }
@@ -4313,7 +4332,10 @@ void Window::present(Queue queue, std::vector<Semaphore> waitSemaphores, uint32_
         .pSwapchains = &impl().vkSwapchain,
         .pImageIndices = &imageIndex
     };
-    ASSERT_SUCCESS(vkQueuePresentKHR(queue.impl().vkQueue, &presentInfo));
+    VkResult res = vkQueuePresentKHR(queue.impl().vkQueue, &presentInfo);
+    
+    if (res != VK_SUBOPTIMAL_KHR)
+        ASSERT_SUCCESS(res);
 }
 
 std::pair<CommandBuffer, Semaphore> Window::getNextPresentingContext(Semaphore onNextScImageWritable) const
@@ -4430,6 +4452,90 @@ void Window::setScrollCallback(void (*callback)(double xoffset, double yoffset))
     glfwSetWindowUserPointer((GLFWwindow*)impl().pWindow, const_cast<Window::Impl*>(&impl()));
     glfwSetScrollCallback((GLFWwindow*)impl().pWindow, glfwCallback);
 }
+
+
+#ifdef EVA_ENABLE_IMGUI
+#include "imgui.h"
+#include "backends/imgui_impl_glfw.h"
+#include "backends/imgui_impl_vulkan.h"
+
+void Window::initImGui(Device device) const
+{
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplGlfw_InitForVulkan((GLFWwindow*)impl().pWindow, true);
+
+    // Only needs to outlive ImGui_ImplVulkan_Init: the main pipeline is created there.
+    VkFormat colorFormat = (VkFormat)(uint32_t)impl().swapchainImageFormat;
+    VkPipelineRenderingCreateInfo pipelineRenderingInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &colorFormat,
+    };
+
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.ApiVersion          = VK_API_VERSION_1_3;
+    initInfo.Instance            = impl().vkInstance;
+    initInfo.PhysicalDevice      = device.impl().vkPhysicalDevice;
+    initInfo.Device              = impl().vkDevice;
+    initInfo.QueueFamily         = device.impl().qfIndex[queue_graphics];
+    initInfo.Queue               = device.queue(queue_graphics).impl().vkQueue;
+    initInfo.DescriptorPool      = VK_NULL_HANDLE;
+    initInfo.DescriptorPoolSize  = 64;     // ImGui creates and owns an internal pool
+    initInfo.MinImageCount       = (uint32_t)impl().swapchainImages.size();
+    initInfo.ImageCount          = (uint32_t)impl().swapchainImages.size();
+    initInfo.UseDynamicRendering = true;
+    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    initInfo.PipelineInfoMain.PipelineRenderingCreateInfo = pipelineRenderingInfo;
+
+    ImGui_ImplVulkan_Init(&initInfo);
+}
+
+
+void Window::newImGuiFrame() const
+{
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+}
+
+
+void Window::renderImGui(CommandBuffer cmd, Image target) const
+{
+    ImGui::Render();
+
+    VkRenderingAttachmentInfo colorAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = target.view().impl().vkImageView,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue  = { .color = { { 0.10f, 0.10f, 0.12f, 1.0f } } },
+    };
+    VkRenderingInfo renderingInfo{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea           = { { 0, 0 }, { impl().width, impl().height } },
+        .layerCount           = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments    = &colorAttachment,
+    };
+
+    VkCommandBuffer vkCmd = cmd.impl().vkCmdBuffer;
+    vkCmdBeginRendering(vkCmd, &renderingInfo);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmd);
+    vkCmdEndRendering(vkCmd);
+}
+
+
+void Window::shutdownImGui() const
+{
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+}
+#endif // EVA_ENABLE_IMGUI
 #endif // EVA_ENABLE_WINDOW
 
 
