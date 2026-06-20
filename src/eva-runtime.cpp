@@ -37,28 +37,28 @@
 
 std::vector<const char*> getRequiredInstanceExtensions()
 {
-#ifdef EVA_ENABLE_WINDOW
-    return { 
-        "VK_KHR_surface" 
+    std::vector<const char*> extensions;
 
-    #ifdef EVA_PLATFORM_WINDOWS
-        , "VK_KHR_win32_surface"
-    #elif defined(EVA_PLATFORM_ANDROID)
-        , "VK_KHR_android_surface"
-    #elif defined(EVA_PLATFORM_XLIB)
-        , "VK_KHR_xlib_surface"
-    #elif defined(EVA_PLATFORM_WAYLAND)
-        , "VK_KHR_wayland_surface"
-    #elif defined(EVA_PLATFORM_MACOS) || defined(EVA_PLATFORM_IOS)
-        , "VK_EXT_metal_surface"
-        , "VK_KHR_portability_enumeration"
-    #endif
-
-    };
-    
-#else
-    return {};
+#if defined(EVA_PLATFORM_MACOS) || defined(EVA_PLATFORM_IOS)
+    extensions.push_back("VK_KHR_portability_enumeration");
 #endif
+
+#ifdef EVA_ENABLE_WINDOW
+    extensions.push_back("VK_KHR_surface");
+    #ifdef EVA_PLATFORM_WINDOWS
+        extensions.push_back("VK_KHR_win32_surface");
+    #elif defined(EVA_PLATFORM_ANDROID)
+        extensions.push_back("VK_KHR_android_surface");
+    #elif defined(EVA_PLATFORM_XLIB)
+        extensions.push_back("VK_KHR_xlib_surface");
+    #elif defined(EVA_PLATFORM_WAYLAND)
+        extensions.push_back("VK_KHR_wayland_surface");
+    #elif defined(EVA_PLATFORM_MACOS) || defined(EVA_PLATFORM_IOS)
+        extensions.push_back("VK_EXT_metal_surface");   // surface only; portability added above
+    #endif
+#endif
+
+    return extensions;
 }
 
 
@@ -159,11 +159,17 @@ static VkInstance createVkInstance()
         .pEnabledValidationFeatures = enables,
     };
 
+    VkInstanceCreateFlags instanceFlags = 0;
+#if defined(EVA_PLATFORM_MACOS) || defined(EVA_PLATFORM_IOS)
+    instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+
     return create<VkInstance>({
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
 #if USE_DEBUG_PRINTF
         .pNext = requiredLayers.empty() ? nullptr : &features,
 #endif
+        .flags = instanceFlags,
         .pApplicationInfo = &appInfo,
         .enabledLayerCount = (uint32_t)requiredLayers.size(),
         .ppEnabledLayerNames = requiredLayers.data(),
@@ -1627,12 +1633,18 @@ void Device::reportAssignedQueues() const
             q.queueFamilyIndex(),
             q.priority());
     };
-    printf("***Graphics Queues***\n");
-    reportQfs(impl().queues[impl().qfIndex[queue_graphics]]);
-    printf("***Compute Queues***\n");
-    reportQfs(impl().queues[impl().qfIndex[queue_compute]]);
-    printf("***Transfer Queues***\n");
-    reportQfs(impl().queues[impl().qfIndex[queue_transfer]]);
+    auto reportType = [&](const char* label, QueueType type) {
+        printf("%s\n", label);
+        // A queue type that was not requested has qfIndex == -1; indexing
+        // queues[] with it would be out of bounds.
+        if (impl().qfIndex[type] == uint32_t(-1))
+            printf("  (none)\n");
+        else
+            reportQfs(impl().queues[impl().qfIndex[type]]);
+    };
+    reportType("***Graphics Queues***", queue_graphics);
+    reportType("***Compute Queues***",  queue_compute);
+    reportType("***Transfer Queues***", queue_transfer);
     fflush(stdout);
 }
 
