@@ -477,7 +477,19 @@ public:
 
     CommandBuffer copyBuffer(
         BufferRange src,
-        BufferRange dst 
+        BufferRange dst
+    );
+
+    CommandBuffer fillBuffer(
+        Buffer dst,
+        uint32_t value,
+        uint64_t dstOffset = 0,
+        uint64_t size = EVA_WHOLE_SIZE
+    );
+
+    CommandBuffer fillBuffer(
+        BufferRange dst,
+        uint32_t value
     );
 
     CommandBuffer copyImage(

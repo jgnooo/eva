@@ -2441,9 +2441,39 @@ CommandBuffer CommandBuffer::copyBuffer(
 CommandBuffer CommandBuffer::copyBuffer(BufferRange src, BufferRange dst)
 {
     return copyBuffer(
-        src.buffer, dst.buffer, 
-        src.offset, dst.offset, 
+        src.buffer, dst.buffer,
+        src.offset, dst.offset,
         std::min(src.size, dst.size));
+}
+
+CommandBuffer CommandBuffer::fillBuffer(
+    Buffer dst,
+    uint32_t value,
+    uint64_t dstOffset,
+    uint64_t size)
+{
+    EVA_ASSERT((uint32_t)dst.impl().usage & VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    EVA_ASSERT(dstOffset % 4 == 0);       // VUID-vkCmdFillBuffer-dstOffset-00025
+    EVA_ASSERT(dstOffset < dst.size());   // VUID-vkCmdFillBuffer-dstOffset-00024
+    if (size != EVA_WHOLE_SIZE)
+    {
+        EVA_ASSERT(dstOffset + size <= dst.size());   // VUID-vkCmdFillBuffer-size-00027
+        EVA_ASSERT(size % 4 == 0);                    // VUID-vkCmdFillBuffer-size-00026
+    }
+
+    // EVA_WHOLE_SIZE == VK_WHOLE_SIZE: fills from dstOffset to the end of the buffer.
+    vkCmdFillBuffer(
+        impl().vkCmdBuffer,
+        dst.impl().vkBuffer,
+        dstOffset,
+        size,
+        value);
+    return *this;
+}
+
+CommandBuffer CommandBuffer::fillBuffer(BufferRange dst, uint32_t value)
+{
+    return fillBuffer(dst.buffer, value, dst.offset, dst.size);
 }
 
 CommandBuffer CommandBuffer::copyImage(
@@ -3414,7 +3444,7 @@ void Buffer::unmap()
     impl().mappedSize = 0;
 }
 
-inline uint64_t Buffer::size() const
+uint64_t Buffer::size() const
 {
     return impl().size;
 }
