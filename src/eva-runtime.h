@@ -121,6 +121,7 @@ private: \
 
 struct ShaderModuleCreateInfo;
 struct ComputePipelineCreateInfo;
+struct GraphicsPipelineCreateInfo;
 struct RaytracingPipelineCreateInfo;
 struct BufferCreateInfo;
 struct ImageCreateInfo;
@@ -133,6 +134,7 @@ struct QueueSelector;
 struct BindingInfo;
 struct DescriptorSetLayoutDesc;
 struct PipelineLayoutDesc;
+struct RenderingInfo;
 
 struct MemoryBarrier;
 struct BufferMemoryBarrier;
@@ -314,6 +316,7 @@ public:
     Semaphore createSemaphore();
     ShaderModule createShaderModule(const ShaderModuleCreateInfo& info);
     ComputePipeline createComputePipeline(const ComputePipelineCreateInfo& info);
+    GraphicsPipeline createGraphicsPipeline(const GraphicsPipelineCreateInfo& info);
 
     Buffer createBuffer(const BufferCreateInfo& info) ;
     Image createImage(const ImageCreateInfo& info);
@@ -542,6 +545,26 @@ public:
         uint32_t numThreadsInZ=1
     );
 
+    CommandBuffer beginRendering(const RenderingInfo& info);
+
+    CommandBuffer endRendering();
+
+    CommandBuffer setViewport(
+        float x, float y, float width, float height,
+        float minDepth=0.0f, float maxDepth=1.0f
+    );
+
+    CommandBuffer setScissor(
+        int32_t x, int32_t y, uint32_t width, uint32_t height
+    );
+
+    CommandBuffer draw(
+        uint32_t vertexCount,
+        uint32_t instanceCount=1,
+        uint32_t firstVertex=0,
+        uint32_t firstInstance=0
+    );
+
     // Query commands
     CommandBuffer resetQueryPool(
         QueryPool pool,
@@ -617,7 +640,13 @@ public:
 };
 
 
-class GraphicsPipeline {};
+class GraphicsPipeline {
+    VULKAN_CLASS_COMMON2(GraphicsPipeline)
+public:
+
+    PipelineLayout layout() const;
+    DescriptorSetLayout descSetLayout(uint32_t setId=0) const;
+};
 
 
 class ComputePipeline {
@@ -1111,6 +1140,53 @@ struct ComputePipelineCreateInfo {
     ShaderStage csStage;
     std::optional<PipelineLayout> layout;
     bool autoLayoutAllowAllStages = false;
+};
+
+
+struct GraphicsPipelineCreateInfo {
+    ShaderStage vsStage;
+    ShaderStage fsStage;
+
+    PRIMITIVE_TOPOLOGY topology     = PRIMITIVE_TOPOLOGY::TRIANGLE_LIST;
+    POLYGON_MODE       polygonMode  = POLYGON_MODE::FILL;
+    CULL_MODE          cullMode     = CULL_MODE::NONE;
+    FRONT_FACE         frontFace    = FRONT_FACE::COUNTER_CLOCKWISE;
+    float              lineWidth    = 1.0f;
+
+    bool       depthTestEnable  = false;
+    bool       depthWriteEnable = false;
+    COMPARE_OP depthCompareOp   = COMPARE_OP::LESS_OR_EQUAL;
+
+    // When true, standard src-alpha over blending is used for every color attachment.
+    bool blendEnable = false;
+
+    // Dynamic-rendering attachment formats (no VkRenderPass needed).
+    std::vector<FORMAT> colorFormats;
+    FORMAT              depthFormat = FORMAT::UNDEFINED;   // UNDEFINED -> no depth attachment
+
+    // Vertex input is currently empty (vertex-pulling / vertex-less shaders).
+    std::optional<PipelineLayout> layout;                 // else derived via reflection
+    bool autoLayoutAllowAllStages = false;
+};
+
+
+struct ColorAttachment {
+    ImageView view;
+    bool  clear         = true;                  // true: LOAD_OP_CLEAR, false: LOAD_OP_LOAD
+    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+};
+
+struct DepthAttachment {
+    ImageView view;
+    bool  clear      = true;
+    float clearDepth = 1.0f;
+};
+
+struct RenderingInfo {
+    uint32_t width  = 0;
+    uint32_t height = 0;
+    std::vector<ColorAttachment>   colorAttachments;
+    std::optional<DepthAttachment> depthAttachment;
 };
 
 

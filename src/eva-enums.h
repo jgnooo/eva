@@ -696,5 +696,41 @@ DEFINE_OPERATOR_OR(BUILD_ACCELERATION_STRUCTURE)
 DEFINE_HAS_FLAGS(BUILD_ACCELERATION_STRUCTURE)
 
 
+enum class PRIMITIVE_TOPOLOGY : uint32_t {
+    POINT_LIST     = 0,
+    LINE_LIST      = 1,
+    LINE_STRIP     = 2,
+    TRIANGLE_LIST  = 3,
+    TRIANGLE_STRIP = 4,
+    TRIANGLE_FAN   = 5,
+    MAX_ENUM       = 0x7FFFFFFF,
+};
+
+
+enum class POLYGON_MODE : uint32_t {
+    FILL     = 0,
+    LINE     = 1,
+    POINT    = 2,
+    MAX_ENUM = 0x7FFFFFFF,
+};
+
+
+enum class CULL_MODE : uint32_t {
+    NONE           = 0,
+    FRONT          = 0x00000001,
+    BACK           = 0x00000002,
+    FRONT_AND_BACK = 0x00000003,
+};
+DEFINE_OPERATOR_OR(CULL_MODE)
+DEFINE_HAS_FLAGS(CULL_MODE)
+
+
+enum class FRONT_FACE : uint32_t {
+    COUNTER_CLOCKWISE = 0,
+    CLOCKWISE         = 1,
+    MAX_ENUM          = 0x7FFFFFFF,
+};
+
+
 
 } // namespace eva
