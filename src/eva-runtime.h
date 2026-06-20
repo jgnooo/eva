@@ -1828,6 +1828,11 @@ class Window {
 public:
     const std::vector<Image>& swapChainImages() const;
 
+    // Swapchain image dimensions (in pixels = framebuffer size) and format.
+    uint32_t width() const;
+    uint32_t height() const;
+    FORMAT   format() const;
+
     void recordPrePresentCommands(std::function<void(CommandBuffer, Image)> recordFunc);
 
     uint32_t acquireNextImageIndex(Semaphore onNextScImageWritable) const;
@@ -1853,7 +1858,7 @@ public:
 #ifdef EVA_ENABLE_IMGUI
     void initImGui(Device device) const;
     void newImGuiFrame() const;
-    void renderImGui(CommandBuffer cmd, Image target) const;
+    void renderImGui(CommandBuffer cmd, Image target, bool clear = true) const;
     void shutdownImGui() const;
 #endif // EVA_ENABLE_IMGUI
 };

@@ -307,6 +307,9 @@ struct Device::Impl {
         bool vulkanMemoryModel = false;
         bool maintenance4 = false;
 
+        bool scalarBlockLayout = false;
+        bool shaderInt64 = false;
+
         bool hostQueryReset = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         bool performanceCounterQueryPools = false;
@@ -1067,6 +1070,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES,
     });
 
+    // Provided by VK_VERSION_1_2 (scalar block layout: vec3 SSBO arrays / GL_EXT_scalar_block_layout)
+    auto& qScalarBlockLayout = queryChain.add(VkPhysicalDeviceScalarBlockLayoutFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES,
+    });
+
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
     // Provided by VK_KHR_performance_query
     auto* qPerfQuery = !supportsExt(VK_KHR_PERFORMANCE_QUERY_EXTENSION_NAME)
@@ -1106,9 +1114,18 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     PNextChain chain;
     Device::Impl::Features enabledFeatures{};
 
-    chain.add(VkPhysicalDeviceFeatures2{
+    if (supportsExt("VK_KHR_portability_subset"))
+        reqExtentions.push_back("VK_KHR_portability_subset");
+
+    auto& features2Enable = chain.add(VkPhysicalDeviceFeatures2{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
     });
+
+    if (features2Query.features.shaderInt64)
+    {
+        features2Enable.features.shaderInt64 = VK_TRUE;
+        enabledFeatures.shaderInt64 = true;
+    }
 
 #ifdef EVA_ENABLE_WINDOW
     if (settings.enableWindow)
@@ -1216,6 +1233,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .maintenance4 = VK_TRUE,
         });
         enabledFeatures.maintenance4 = true;
+    }
+
+    // Provided by VK_VERSION_1_2 (scalar block layout for vec3 SSBO arrays)
+    if (qScalarBlockLayout.scalarBlockLayout)
+    {
+        chain.add(VkPhysicalDeviceScalarBlockLayoutFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES,
+            .scalarBlockLayout = VK_TRUE,
+        });
+        enabledFeatures.scalarBlockLayout = true;
     }
 
     // Provided by VK_VERSION_1_2
@@ -2325,16 +2352,21 @@ CommandBuffer CommandBuffer::barrier(
                             barrier.newLayout = IMAGE_LAYOUT::GENERAL;
                     }
 
-                    if (barrier.oldLayout == IMAGE_LAYOUT::PRESENT_SRC) 
+                    if (barrier.oldLayout == IMAGE_LAYOUT::PRESENT_SRC)
                     {
                         barrier.srcMask = SYNC_SCOPE::NONE;
                     }
 
-                    if (barrier.newLayout == IMAGE_LAYOUT::PRESENT_SRC) 
+                    if (barrier.newLayout == IMAGE_LAYOUT::PRESENT_SRC)
                     {
                         barrier.dstMask = SYNC_SCOPE::NONE;
                     }
                 }
+
+                if (barrier.srcMask.scope.stage == SYNC_SCOPE::PRESENT_SRC.stage)
+                    barrier.srcMask = SYNC_SCOPE::NONE;
+                if (barrier.dstMask.scope.stage == SYNC_SCOPE::PRESENT_SRC.stage)
+                    barrier.dstMask = SYNC_SCOPE::NONE;
 
                 imageBarriers.emplace_back(
                     VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -4563,8 +4595,14 @@ Window Runtime::createWindow(WindowCreateInfo info)
     
     VkSurfaceCapabilitiesKHR capabilities;
     ASSERT_SUCCESS(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, vkSurface, &capabilities));
-    EVA_ASSERT(capabilities.currentExtent.width == info.width      // in almost platforms
-        || capabilities.currentExtent.width == UINT32_MAX);     // in Wayland, etc.
+
+    // Swapchain images must match the surface's reported size. On hi-DPI/Retina
+    // the framebuffer (pixels) is larger than the requested window size (points),
+    // so we use currentExtent rather than info.width/height. UINT32_MAX means the
+    // surface takes its size from the swapchain (Wayland) -> fall back to request.
+    VkExtent2D scExtent = capabilities.currentExtent;
+    if (scExtent.width == UINT32_MAX)
+        scExtent = { info.width, info.height };
 
     EVA_ASSERT( 
         ([&]() { 
@@ -4619,7 +4657,7 @@ Window Runtime::createWindow(WindowCreateInfo info)
         .minImageCount = minSwapChainImages,
         .imageFormat = (VkFormat)(uint32_t)info.swapChainImageFormat,
         .imageColorSpace = (VkColorSpaceKHR)(uint32_t)info.swapChainImageColorSpace,
-        .imageExtent = { info.width, info.height }, 
+        .imageExtent = scExtent,
         .imageArrayLayers = 1,
         .imageUsage = (VkImageUsageFlags)(uint32_t)info.swapChainImageUsage,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,          // TODO: support VK_SHARING_MODE_CONCURRENT
@@ -4640,8 +4678,8 @@ Window Runtime::createWindow(WindowCreateInfo info)
                 vkImage,
                 VK_NULL_HANDLE,    // memory is owned by the swapchain
                 info.swapChainImageFormat,
-                info.width,
-                info.height,
+                scExtent.width,
+                scExtent.height,
                 1,                  // depth
                 1,                  // arrayLayers
                 info.swapChainImageUsage,
@@ -4655,8 +4693,8 @@ Window Runtime::createWindow(WindowCreateInfo info)
     auto pImpl = new Window::Impl(
         pWindow,
         vkSurface,
-        info.width,
-        info.height,
+        scExtent.width,
+        scExtent.height,
         impl().instance,
         info.device.impl().vkDevice,
         vkSwapchain,
@@ -4682,6 +4720,10 @@ const std::vector<Image>& Window::swapChainImages() const
 {
     return impl().swapchainImages;
 }
+
+uint32_t Window::width() const  { return impl().width; }
+uint32_t Window::height() const { return impl().height; }
+FORMAT   Window::format() const { return impl().swapchainImageFormat; }
 
 void Window::recordPrePresentCommands(std::function<void(CommandBuffer, Image)> recordFunc)
 {
@@ -4902,7 +4944,7 @@ void Window::newImGuiFrame() const
 }
 
 
-void Window::renderImGui(CommandBuffer cmd, Image target) const
+void Window::renderImGui(CommandBuffer cmd, Image target, bool clear) const
 {
     ImGui::Render();
 
@@ -4910,7 +4952,7 @@ void Window::renderImGui(CommandBuffer cmd, Image target) const
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView   = target.view().impl().vkImageView,
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .loadOp      = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
         .clearValue  = { .color = { { 0.10f, 0.10f, 0.12f, 1.0f } } },
     };
