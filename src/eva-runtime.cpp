@@ -277,6 +277,7 @@ struct Device::Impl {
         bool cooperativeMatrix = false;
         bool vulkanMemoryModel = false;
         bool maintenance4 = false;
+        bool subgroupSizeControl = false;
 
         bool hostQueryReset = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
@@ -327,7 +328,9 @@ struct Device::Impl {
         std::vector<Device::CooperativeMatrixProperties> shapes;
     } coopMat;
 
-    uint32_t subgroupSize = 0;   // VkPhysicalDeviceSubgroupProperties.subgroupSize
+    uint32_t subgroupSize = 0;      // VkPhysicalDeviceSubgroupProperties.subgroupSize
+    uint32_t minSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.minSubgroupSize
+    uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
 
     CommandPool defaultCmdPool[queue_max][8] = {};
 
@@ -1017,6 +1020,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES,
     });
 
+    // Provided by VK_VERSION_1_3 (required for ComputePipelineCreateInfo::requiredSubgroupSize)
+    auto& qSubgroupSizeCtrl = queryChain.add(VkPhysicalDeviceSubgroupSizeControlFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+    });
+
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
     // Provided by VK_KHR_performance_query
     auto* qPerfQuery = !supportsExt(VK_KHR_PERFORMANCE_QUERY_EXTENSION_NAME)
@@ -1156,6 +1164,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .maintenance4 = VK_TRUE,
         });
         enabledFeatures.maintenance4 = true;
+    }
+
+    // Provided by VK_VERSION_1_3 (enables VkPipelineShaderStageRequiredSubgroupSizeCreateInfo)
+    if (qSubgroupSizeCtrl.subgroupSizeControl)
+    {
+        chain.add(VkPhysicalDeviceSubgroupSizeControlFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+            .subgroupSizeControl = VK_TRUE,
+        });
+        enabledFeatures.subgroupSizeControl = true;
     }
 
     // Provided by VK_VERSION_1_2
@@ -1453,10 +1471,14 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         throw std::runtime_error("The selected physical device does not support synchronization2 feature, which is required by the runtime.");
     }
 
-    // Cache the device subgroup size (Vulkan 1.1 core).
+    // Cache the device subgroup sizes (Vulkan 1.1 / 1.3 core).
     {
+        VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeCtrlProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES,
+        };
         VkPhysicalDeviceSubgroupProperties subgroupProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+            .pNext = &subgroupSizeCtrlProps,
         };
         VkPhysicalDeviceProperties2 props2{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
@@ -1464,6 +1486,8 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         };
         vkGetPhysicalDeviceProperties2(pd, &props2);
         pImpl->subgroupSize = subgroupProps.subgroupSize;
+        pImpl->minSubgroupSize = subgroupSizeCtrlProps.minSubgroupSize;
+        pImpl->maxSubgroupSize = subgroupSizeCtrlProps.maxSubgroupSize;
     }
 
     // Cache every cooperative-matrix shape the device reports.
@@ -1694,6 +1718,16 @@ const std::vector<Device::CooperativeMatrixProperties>& Device::cooperativeMatri
 uint32_t Device::subgroupSize() const
 {
     return impl().subgroupSize;
+}
+
+uint32_t Device::minSubgroupSize() const
+{
+    return impl().minSubgroupSize;
+}
+
+uint32_t Device::maxSubgroupSize() const
+{
+    return impl().maxSubgroupSize;
 }
 
 
@@ -2958,6 +2992,19 @@ ComputePipeline Device::createComputePipeline(const ComputePipelineCreateInfo& i
     };
 
     stageInfo.pSpecializationInfo = (VkSpecializationInfo*) spec.getInfo();
+
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSubgroupSizeInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+        .requiredSubgroupSize = info.requiredSubgroupSize,
+    };
+    if (info.requiredSubgroupSize != 0)
+    {
+        EVA_ASSERT(impl().features.subgroupSizeControl);
+        EVA_ASSERT((info.requiredSubgroupSize & (info.requiredSubgroupSize - 1)) == 0);
+        EVA_ASSERT(impl().minSubgroupSize <= info.requiredSubgroupSize
+                && info.requiredSubgroupSize <= impl().maxSubgroupSize);
+        stageInfo.pNext = &requiredSubgroupSizeInfo;
+    }
 
     VkComputePipelineCreateInfo createInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
