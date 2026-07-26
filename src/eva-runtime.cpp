@@ -332,6 +332,10 @@ struct Device::Impl {
     uint32_t minSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.minSubgroupSize
     uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
 
+    uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
+    uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
+    DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
+
     CommandPool defaultCmdPool[queue_max][8] = {};
 
     Impl(VkPhysicalDevice vkPhysicalDevice,   
@@ -1471,10 +1475,14 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         throw std::runtime_error("The selected physical device does not support synchronization2 feature, which is required by the runtime.");
     }
 
-    // Cache the device subgroup sizes (Vulkan 1.1 / 1.3 core).
+    // Cache the device identity and subgroup sizes (Vulkan 1.1 / 1.2 / 1.3 core).
     {
+        VkPhysicalDeviceDriverProperties driverProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+        };
         VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeCtrlProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES,
+            .pNext = &driverProps,
         };
         VkPhysicalDeviceSubgroupProperties subgroupProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
@@ -1488,6 +1496,9 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->subgroupSize = subgroupProps.subgroupSize;
         pImpl->minSubgroupSize = subgroupSizeCtrlProps.minSubgroupSize;
         pImpl->maxSubgroupSize = subgroupSizeCtrlProps.maxSubgroupSize;
+        pImpl->vendorID = props2.properties.vendorID;
+        pImpl->deviceID = props2.properties.deviceID;
+        pImpl->driverID = (DRIVER_ID) driverProps.driverID;
     }
 
     // Cache every cooperative-matrix shape the device reports.
@@ -1728,6 +1739,21 @@ uint32_t Device::minSubgroupSize() const
 uint32_t Device::maxSubgroupSize() const
 {
     return impl().maxSubgroupSize;
+}
+
+uint32_t Device::vendorID() const
+{
+    return impl().vendorID;
+}
+
+uint32_t Device::deviceID() const
+{
+    return impl().deviceID;
+}
+
+DRIVER_ID Device::driverID() const
+{
+    return impl().driverID;
 }
 
 

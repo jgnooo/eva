@@ -331,6 +331,10 @@ public:
     // (VkPhysicalDeviceSubgroupSizeControlProperties).
     uint32_t minSubgroupSize() const;
     uint32_t maxSubgroupSize() const;
+    // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
+    uint32_t vendorID() const;
+    uint32_t deviceID() const;
+    DRIVER_ID driverID() const;
 
     // Timestamp Query Pool
     bool supportsTimestampQueries() const;

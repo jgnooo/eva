@@ -536,6 +536,57 @@ DEFINE_OPERATOR_OR(COMMAND_BUFFER_USAGE)
 DEFINE_HAS_FLAGS(COMMAND_BUFFER_USAGE)
 
 
+namespace VENDOR_ID {
+    constexpr uint32_t AMD = 0x1002;
+    constexpr uint32_t NVIDIA = 0x10DE;
+    constexpr uint32_t INTEL = 0x8086;
+    constexpr uint32_t QUALCOMM = 0x5143;
+    constexpr uint32_t ARM = 0x13B5;
+    constexpr uint32_t APPLE = 0x106B;
+    constexpr uint32_t SAMSUNG = 0x1D6E;
+    constexpr uint32_t IMAGINATION = 0x1010;
+    constexpr uint32_t GOOGLE = 0x1AE0;
+    constexpr uint32_t GGP = 0x1FC8;
+    constexpr uint32_t BROADCOM = 0x14E4;
+    constexpr uint32_t MESA = 0x10005A00; // Custom vendor ID for Mesa drivers
+    constexpr uint32_t COREAVI = 0x1D6B;
+    constexpr uint32_t JUICE = 0x1D6C;
+    constexpr uint32_t VERISILICON = 0x1D6D;
+};
+
+
+enum class DRIVER_ID : uint32_t {
+    AMD_PROPRIETARY               = 1,
+    AMD_OPEN_SOURCE               = 2,
+    MESA_RADV                     = 3,
+    NVIDIA_PROPRIETARY            = 4,
+    INTEL_PROPRIETARY_WINDOWS     = 5,
+    INTEL_OPEN_SOURCE_MESA        = 6,
+    IMAGINATION_PROPRIETARY       = 7,
+    QUALCOMM_PROPRIETARY          = 8,
+    ARM_PROPRIETARY               = 9,
+    GOOGLE_SWIFTSHADER            = 10,
+    GGP_PROPRIETARY               = 11,
+    BROADCOM_PROPRIETARY          = 12,
+    MESA_LLVMPIPE                 = 13,
+    MOLTENVK                      = 14,
+    COREAVI_PROPRIETARY           = 15,
+    JUICE_PROPRIETARY             = 16,
+    VERISILICON_PROPRIETARY       = 17,
+    MESA_TURNIP                   = 18,
+    MESA_V3DV                     = 19,
+    MESA_PANVK                    = 20,
+    SAMSUNG_PROPRIETARY           = 21,
+    MESA_VENUS                    = 22,
+    MESA_DOZEN                    = 23,
+    MESA_NVK                      = 24,
+    IMAGINATION_OPEN_SOURCE_MESA  = 25,
+    MESA_HONEYKRISP               = 26,
+    VULKAN_SC_EMULATION_ON_VULKAN = 27,
+    MAX_ENUM                      = 0x7FFFFFFF,
+};
+
+
 enum class PRESENT_MODE : uint32_t {
     IMMEDIATE               = 0,
     MAILBOX                 = 1,
