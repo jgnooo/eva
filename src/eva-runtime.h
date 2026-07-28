@@ -1088,6 +1088,7 @@ struct ComputePipelineCreateInfo {
     std::optional<PipelineLayout> layout;
     bool autoLayoutAllowAllStages = false;
     uint32_t requiredSubgroupSize = 0;
+    bool robustBufferAccess = false;   // per-pipeline robust storage/uniform buffer access (VK_EXT_pipeline_robustness)
 };
 
 

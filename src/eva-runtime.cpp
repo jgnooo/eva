@@ -268,6 +268,7 @@ struct Device::Impl {
     struct Features {
         bool synchronization2 = false;
         bool nullDescriptor = false;
+        bool pipelineRobustness = false;
         bool graphicsPipelineLibrary = false;
 
         bool shaderFloat16 = false;
@@ -1002,6 +1003,12 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
         });
 
+    // Provided by VK_EXT_pipeline_robustness
+    auto* qPipelineRobustness = !supportsExt(VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDevicePipelineRobustnessFeaturesEXT{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
+        });
+
     // Provided by VK_EXT_graphics_pipeline_library
     auto* qGpl = !supportsExt(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{
@@ -1121,6 +1128,21 @@ Device Runtime::createDevice(const DeviceSettings& settings)
                 .nullDescriptor = VK_TRUE,
             });
             enabledFeatures.nullDescriptor = true;
+        }
+    }
+
+    // Provided by VK_EXT_pipeline_robustness
+    if (qPipelineRobustness)
+    {
+        reqExtentions.push_back(VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
+
+        if (qPipelineRobustness->pipelineRobustness)
+        {
+            chain.add(VkPhysicalDevicePipelineRobustnessFeaturesEXT{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
+                .pipelineRobustness = VK_TRUE,
+            });
+            enabledFeatures.pipelineRobustness = true;
         }
     }
 
@@ -3032,11 +3054,25 @@ ComputePipeline Device::createComputePipeline(const ComputePipelineCreateInfo& i
         stageInfo.pNext = &requiredSubgroupSizeInfo;
     }
 
+    VkPipelineRobustnessCreateInfoEXT robustnessInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT,
+        .storageBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT,
+        .uniformBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT,
+        .vertexInputs   = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT_EXT,
+        .images         = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT_EXT,
+    };
+
     VkComputePipelineCreateInfo createInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = stageInfo,
         .layout = layout.impl().vkPipeLayout,
     };
+
+    if (info.robustBufferAccess)
+    {
+        EVA_ASSERT(impl().features.pipelineRobustness);
+        createInfo.pNext = &robustnessInfo;
+    }
 
     VkPipeline vkHandle;
     ASSERT_SUCCESS(vkCreateComputePipelines(
