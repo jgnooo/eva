@@ -1743,6 +1743,11 @@ bool Device::supportsCooperativeMatrix() const
     return impl().features.cooperativeMatrix;
 }
 
+bool Device::supportsPipelineRobustness() const
+{
+    return impl().features.pipelineRobustness;
+}
+
 const std::vector<Device::CooperativeMatrixProperties>& Device::cooperativeMatrixProperties() const
 {
     return impl().coopMat.shapes;
