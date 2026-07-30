@@ -336,6 +336,7 @@ struct Device::Impl {
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
     DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
+    uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
 
     CommandPool defaultCmdPool[queue_max][8] = {};
 
@@ -918,6 +919,26 @@ struct PNextChain {
         return *p;
     }
 };
+
+// Intel Xe-core counts by PCI device id — Intel exposes no Vulkan query for
+// this. Ported from ggml-vulkan (ggml_vk_intel_shader_core_count); unlisted
+// devices (integrated Arc included) resolve to 0.
+static uint32_t intelCoreClusterCount(uint32_t deviceID)
+{
+    switch (deviceID) {
+        case 0x56A6:                            return 6;    // A310
+        case 0x5693: case 0x56A5: case 0x56B1:  return 8;    // A370M / A380 / Pro A40/A50
+        case 0x5697:                            return 12;   // A530M
+        case 0x5692: case 0x56B3:               return 16;   // A550M / Pro A60
+        case 0x56A2:                            return 24;   // A580
+        case 0x5691: case 0x56A1:               return 28;   // A730M / A750
+        case 0x56A0: case 0x5690:               return 32;   // A770 / A770M
+        case 0xE212:                            return 16;   // Pro B50
+        case 0xE20C:                            return 18;   // B570
+        case 0xE20B: case 0xE211:               return 20;   // B580 / Pro B60
+        default:                                return 0;
+    }
+}
 
 Device Runtime::createDevice(const DeviceSettings& settings)
 {
@@ -1514,6 +1535,27 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
             .pNext = &subgroupProps,
         };
+
+        // Core-cluster count sources (selection order ported from ggml-vulkan).
+        VkPhysicalDeviceShaderSMBuiltinsPropertiesNV smBuiltinsProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV,
+        };
+        VkPhysicalDeviceShaderCoreProperties2AMD amdCoreProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_2_AMD,
+        };
+        const bool hasSmBuiltins   = supportsExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
+        const bool hasAmdCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME);
+        if (hasSmBuiltins)
+        {
+            smBuiltinsProps.pNext = props2.pNext;
+            props2.pNext = &smBuiltinsProps;
+        }
+        if (hasAmdCoreProps)
+        {
+            amdCoreProps.pNext = props2.pNext;
+            props2.pNext = &amdCoreProps;
+        }
+
         vkGetPhysicalDeviceProperties2(pd, &props2);
         pImpl->subgroupSize = subgroupProps.subgroupSize;
         pImpl->minSubgroupSize = subgroupSizeCtrlProps.minSubgroupSize;
@@ -1521,6 +1563,13 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->vendorID = props2.properties.vendorID;
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
+
+        if (hasSmBuiltins)
+            pImpl->coreClusterCount = smBuiltinsProps.shaderSMCount;
+        else if (hasAmdCoreProps)
+            pImpl->coreClusterCount = amdCoreProps.activeComputeUnitCount;
+        else if (pImpl->vendorID == VENDOR_ID::INTEL)
+            pImpl->coreClusterCount = intelCoreClusterCount(pImpl->deviceID);
     }
 
     // Cache every cooperative-matrix shape the device reports.
@@ -1781,6 +1830,11 @@ uint32_t Device::deviceID() const
 DRIVER_ID Device::driverID() const
 {
     return impl().driverID;
+}
+
+uint32_t Device::coreClusterCount() const
+{
+    return impl().coreClusterCount;
 }
 
 
