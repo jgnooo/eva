@@ -332,11 +332,14 @@ struct Device::Impl {
     uint32_t subgroupSize = 0;      // VkPhysicalDeviceSubgroupProperties.subgroupSize
     uint32_t minSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.minSubgroupSize
     uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
+    bool subgroupArithmetic = false;   // ARITHMETIC op class usable from compute shaders
 
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
     DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
     uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
+    std::array<uint32_t, 3> maxComputeWorkGroupCount = {};   // VkPhysicalDeviceLimits.maxComputeWorkGroupCount
+    uint32_t maxComputeSharedMemorySize = 0;                 // VkPhysicalDeviceLimits.maxComputeSharedMemorySize
 
     CommandPool defaultCmdPool[queue_max][8] = {};
 
@@ -1564,6 +1567,17 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
 
+        // Arithmetic ops are only usable where the compute stage is one of the
+        // stages the device reports subgroup support for.
+        pImpl->subgroupArithmetic =
+            (subgroupProps.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)
+            && (subgroupProps.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT);
+
+        const VkPhysicalDeviceLimits& limits = props2.properties.limits;
+        for (uint32_t i = 0; i < pImpl->maxComputeWorkGroupCount.size(); ++i)
+            pImpl->maxComputeWorkGroupCount[i] = limits.maxComputeWorkGroupCount[i];
+        pImpl->maxComputeSharedMemorySize = limits.maxComputeSharedMemorySize;
+
         if (hasSmBuiltins)
             pImpl->coreClusterCount = smBuiltinsProps.shaderSMCount;
         else if (hasAmdCoreProps)
@@ -1817,6 +1831,11 @@ uint32_t Device::maxSubgroupSize() const
     return impl().maxSubgroupSize;
 }
 
+bool Device::supportsSubgroupArithmetic() const
+{
+    return impl().subgroupArithmetic;
+}
+
 uint32_t Device::vendorID() const
 {
     return impl().vendorID;
@@ -1835,6 +1854,16 @@ DRIVER_ID Device::driverID() const
 uint32_t Device::coreClusterCount() const
 {
     return impl().coreClusterCount;
+}
+
+std::array<uint32_t, 3> Device::maxComputeWorkGroupCount() const
+{
+    return impl().maxComputeWorkGroupCount;
+}
+
+uint32_t Device::maxComputeSharedMemorySize() const
+{
+    return impl().maxComputeSharedMemorySize;
 }
 
 

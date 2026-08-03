@@ -8,6 +8,7 @@
 #include <optional>
 #include <memory>
 #include <tuple>
+#include <array>
 #include <utility>
 #include <cstring>
 #include <functional>
@@ -334,12 +335,21 @@ public:
     // (VkPhysicalDeviceSubgroupSizeControlProperties).
     uint32_t minSubgroupSize() const;
     uint32_t maxSubgroupSize() const;
+    // True if compute shaders may use the subgroup arithmetic ops
+    // (subgroupAdd / Mul / Min / Max and their variants).
+    bool supportsSubgroupArithmetic() const;
     // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
     uint32_t vendorID() const;
     uint32_t deviceID() const;
     DRIVER_ID driverID() const;
     // Shader core-cluster count (NVIDIA SM / AMD CU(instead of WGP) / Intel Xe-core); 0 when unknown.
     uint32_t coreClusterCount() const;
+    // Max workgroup count a dispatch may use, per grid axis
+    // (VkPhysicalDeviceLimits.maxComputeWorkGroupCount).
+    std::array<uint32_t, 3> maxComputeWorkGroupCount() const;
+    // Max total shared memory one workgroup may declare, in bytes
+    // (VkPhysicalDeviceLimits.maxComputeSharedMemorySize).
+    uint32_t maxComputeSharedMemorySize() const;
 
     // Timestamp Query Pool
     bool supportsTimestampQueries() const;
