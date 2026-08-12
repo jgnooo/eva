@@ -86,6 +86,11 @@ eva::SpvBlob eva::SpvBlob::readFrom(const char* filepath)
 
 PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHR_ = nullptr;
 
+// VK_KHR_pipeline_executable_properties
+PFN_vkGetPipelineExecutablePropertiesKHR vkGetPipelineExecutableProperties_ = nullptr;
+PFN_vkGetPipelineExecutableStatisticsKHR vkGetPipelineExecutableStatistics_ = nullptr;
+PFN_vkGetPipelineExecutableInternalRepresentationsKHR vkGetPipelineExecutableInternalRepresentations_ = nullptr;
+
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
 // VK_KHR_performance_query
 PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR vkEnumeratePerformanceQueryCountersKHR_ = nullptr;
@@ -281,6 +286,7 @@ struct Device::Impl {
         bool subgroupSizeControl = false;
 
         bool hostQueryReset = false;
+        bool pipelineExecutableInfo = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         bool performanceCounterQueryPools = false;
 #endif
@@ -1033,6 +1039,12 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
         });
 
+    // Provided by VK_KHR_pipeline_executable_properties
+    auto* qPipeExecProps = !supportsExt(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+        });
+
     // Provided by VK_EXT_graphics_pipeline_library
     auto* qGpl = !supportsExt(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{
@@ -1167,6 +1179,21 @@ Device Runtime::createDevice(const DeviceSettings& settings)
                 .pipelineRobustness = VK_TRUE,
             });
             enabledFeatures.pipelineRobustness = true;
+        }
+    }
+
+    // Provided by VK_KHR_pipeline_executable_properties
+    if (qPipeExecProps)
+    {
+        reqExtentions.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+
+        if (qPipeExecProps->pipelineExecutableInfo)
+        {
+            chain.add(VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+                .pipelineExecutableInfo = VK_TRUE,
+            });
+            enabledFeatures.pipelineExecutableInfo = true;
         }
     }
 
@@ -1621,6 +1648,17 @@ Device Runtime::createDevice(const DeviceSettings& settings)
                 pImpl->coopMat.shapes.push_back(s);
             }
         }
+    }
+
+    // VK_KHR_pipeline_executable_properties function pointers
+    if (enabledFeatures.pipelineExecutableInfo)
+    {
+        vkGetPipelineExecutableProperties_ = (PFN_vkGetPipelineExecutablePropertiesKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkGetPipelineExecutablePropertiesKHR");
+        vkGetPipelineExecutableStatistics_ = (PFN_vkGetPipelineExecutableStatisticsKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkGetPipelineExecutableStatisticsKHR");
+        vkGetPipelineExecutableInternalRepresentations_ = (PFN_vkGetPipelineExecutableInternalRepresentationsKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkGetPipelineExecutableInternalRepresentationsKHR");
     }
 
 #ifdef EVA_ENABLE_RAYTRACING
@@ -3162,6 +3200,13 @@ ComputePipeline Device::createComputePipeline(const ComputePipelineCreateInfo& i
         createInfo.pNext = &robustnessInfo;
     }
 
+    if (info.captureStatistics)
+    {
+        EVA_ASSERT(impl().features.pipelineExecutableInfo);
+        createInfo.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR
+                          | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+    }
+
     VkPipeline vkHandle;
     ASSERT_SUCCESS(vkCreateComputePipelines(
         impl().vkDevice, VK_NULL_HANDLE,
@@ -3188,6 +3233,110 @@ PipelineLayout ComputePipeline::layout() const
 DescriptorSetLayout ComputePipeline::descSetLayout(uint32_t setId) const
 {
     return impl().layout.descSetLayout(setId);
+}
+
+std::vector<PipelineExecutable> ComputePipeline::executables() const
+{
+    if (!vkGetPipelineExecutableProperties_)
+        return {};
+
+    VkPipelineInfoKHR pipeInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR,
+        .pipeline = impl().vkPipeline,
+    };
+    uint32_t count = 0;
+    vkGetPipelineExecutableProperties_(impl().vkDevice, &pipeInfo, &count, nullptr);
+
+    std::vector<VkPipelineExecutablePropertiesKHR> props(count, {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR,
+    });
+    vkGetPipelineExecutableProperties_(impl().vkDevice, &pipeInfo, &count, props.data());
+
+    std::vector<PipelineExecutable> out;
+    out.reserve(count);
+    for (const auto& p : props)
+        out.push_back({ p.name, p.description, p.subgroupSize });
+    return out;
+}
+
+std::vector<PipelineStatistic> ComputePipeline::statistics() const
+{
+    if (!vkGetPipelineExecutableProperties_ || !vkGetPipelineExecutableStatistics_)
+        return {};
+
+    std::vector<PipelineStatistic> out;
+    const uint32_t execCount = (uint32_t) executables().size();
+
+    for (uint32_t e = 0; e < execCount; ++e)
+    {
+        VkPipelineExecutableInfoKHR execInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+            .pipeline = impl().vkPipeline,
+            .executableIndex = e,
+        };
+
+        uint32_t count = 0;
+        vkGetPipelineExecutableStatistics_(impl().vkDevice, &execInfo, &count, nullptr);
+        std::vector<VkPipelineExecutableStatisticKHR> stats(count, {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR,
+        });
+        vkGetPipelineExecutableStatistics_(impl().vkDevice, &execInfo, &count, stats.data());
+
+        for (const auto& s : stats)
+        {
+            std::string value;
+            switch (s.format)
+            {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:  value = s.value.b32 ? "true" : "false"; break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:   value = std::to_string(s.value.i64); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:  value = std::to_string(s.value.u64); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: value = std::to_string(s.value.f64); break;
+            default: break;
+            }
+            out.push_back({ s.name, s.description, std::move(value) });
+        }
+    }
+    return out;
+}
+
+std::vector<PipelineInternalRepresentation> ComputePipeline::internalRepresentations() const
+{
+    if (!vkGetPipelineExecutableProperties_ || !vkGetPipelineExecutableInternalRepresentations_)
+        return {};
+
+    std::vector<PipelineInternalRepresentation> out;
+    const uint32_t execCount = (uint32_t) executables().size();
+
+    for (uint32_t e = 0; e < execCount; ++e)
+    {
+        VkPipelineExecutableInfoKHR execInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+            .pipeline = impl().vkPipeline,
+            .executableIndex = e,
+        };
+
+        // Three calls, not two: the count comes first, then a pass that fills
+        // in each dataSize, and only then can the buffers exist to write into.
+        uint32_t count = 0;
+        vkGetPipelineExecutableInternalRepresentations_(impl().vkDevice, &execInfo, &count, nullptr);
+        std::vector<VkPipelineExecutableInternalRepresentationKHR> irs(count, {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR,
+        });
+        vkGetPipelineExecutableInternalRepresentations_(impl().vkDevice, &execInfo, &count, irs.data());
+
+        std::vector<std::vector<uint8_t>> blobs(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            blobs[i].resize(irs[i].dataSize);
+            irs[i].pData = blobs[i].data();
+        }
+        vkGetPipelineExecutableInternalRepresentations_(impl().vkDevice, &execInfo, &count, irs.data());
+
+        for (uint32_t i = 0; i < count; ++i)
+            out.push_back({ irs[i].name, irs[i].description,
+                            irs[i].isText == VK_TRUE, std::move(blobs[i]) });
+    }
+    return out;
 }
 
 

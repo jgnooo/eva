@@ -611,12 +611,51 @@ public:
 class GraphicsPipeline {};
 
 
+// One compiled unit a pipeline turned into. How a pipeline splits is the
+// driver's call: a stage each, several stages merged, or the same shader once
+// per dispatch width. Statistics and internal representations are per
+// executable, not per pipeline, which is why they are indexed against this.
+struct PipelineExecutable {
+    std::string name;
+    std::string description;
+    uint32_t subgroupSize;
+};
+
+
+// One number the driver kept from compiling a pipeline. Names, units and which
+// numbers exist at all are the driver's own — Intel reports instruction and
+// memory-message counts, spill/fill, scratch size and dispatch width — so read
+// these as diagnostics, never as something to branch on.
+struct PipelineStatistic {
+    std::string name;
+    std::string description;
+    std::string value;   // rendered from whichever of the driver's four formats it used
+};
+
+
+// A compiler-internal form of the pipeline. On the drivers that expose one this
+// is the ISA disassembly, which is the only account of register allocation and
+// scheduling that is not a guess.
+struct PipelineInternalRepresentation {
+    std::string name;
+    std::string description;
+    bool isText;
+    std::vector<uint8_t> data;
+};
+
+
 class ComputePipeline {
     VULKAN_CLASS_COMMON2(ComputePipeline)
 public:
 
     PipelineLayout layout() const;
     DescriptorSetLayout descSetLayout(uint32_t setId=0) const;
+
+    // All three are empty unless the pipeline was created with captureStatistics
+    // and the device took VK_KHR_pipeline_executable_properties.
+    std::vector<PipelineExecutable> executables() const;
+    std::vector<PipelineStatistic> statistics() const;
+    std::vector<PipelineInternalRepresentation> internalRepresentations() const;
 };
 
 
@@ -1104,6 +1143,10 @@ struct ComputePipelineCreateInfo {
     bool autoLayoutAllowAllStages = false;
     uint32_t requiredSubgroupSize = 0;
     bool robustBufferAccess = false;   // per-pipeline robust storage/uniform buffer access (VK_EXT_pipeline_robustness)
+    // Keep the compiler's statistics and internal representations queryable
+    // (VK_KHR_pipeline_executable_properties). The spec lets a driver compile
+    // differently when this is set, so leave it off for anything being timed.
+    bool captureStatistics = false;
 };
 
 
