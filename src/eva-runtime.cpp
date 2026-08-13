@@ -346,6 +346,7 @@ struct Device::Impl {
     uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
     std::array<uint32_t, 3> maxComputeWorkGroupCount = {};   // VkPhysicalDeviceLimits.maxComputeWorkGroupCount
     uint32_t maxComputeSharedMemorySize = 0;                 // VkPhysicalDeviceLimits.maxComputeSharedMemorySize
+    uint32_t minStorageBufferOffsetAlignment = 1;            // VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment
 
     CommandPool defaultCmdPool[queue_max][8] = {};
 
@@ -1604,6 +1605,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         for (uint32_t i = 0; i < pImpl->maxComputeWorkGroupCount.size(); ++i)
             pImpl->maxComputeWorkGroupCount[i] = limits.maxComputeWorkGroupCount[i];
         pImpl->maxComputeSharedMemorySize = limits.maxComputeSharedMemorySize;
+        pImpl->minStorageBufferOffsetAlignment = uint32_t(limits.minStorageBufferOffsetAlignment);
 
         if (hasSmBuiltins)
             pImpl->coreClusterCount = smBuiltinsProps.shaderSMCount;
@@ -1902,6 +1904,11 @@ std::array<uint32_t, 3> Device::maxComputeWorkGroupCount() const
 uint32_t Device::maxComputeSharedMemorySize() const
 {
     return impl().maxComputeSharedMemorySize;
+}
+
+uint32_t Device::minStorageBufferOffsetAlignment() const
+{
+    return impl().minStorageBufferOffsetAlignment;
 }
 
 

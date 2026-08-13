@@ -350,6 +350,9 @@ public:
     // Max total shared memory one workgroup may declare, in bytes
     // (VkPhysicalDeviceLimits.maxComputeSharedMemorySize).
     uint32_t maxComputeSharedMemorySize() const;
+    // Alignment a storage-buffer descriptor's offset must be a multiple of, in
+    // bytes (VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment).
+    uint32_t minStorageBufferOffsetAlignment() const;
 
     // Timestamp Query Pool
     bool supportsTimestampQueries() const;
@@ -1296,12 +1299,14 @@ struct BufferRange {
     , offset(0)
     , size(0) {};
     
-    BufferRange(Buffer buffer, 
-        uint64_t offset=0, 
+    // The null-buffer guard is load-bearing: Buffer::size() derefs an impl a null
+    // buffer does not have. A null Buffer is how callers spell an absent binding.
+    BufferRange(Buffer buffer,
+        uint64_t offset=0,
         uint64_t size=EVA_WHOLE_SIZE)
     : buffer(buffer)
     , offset(offset)
-    , size(size==EVA_WHOLE_SIZE ? buffer.size() - offset : size) {}
+    , size(!buffer ? 0 : (size==EVA_WHOLE_SIZE ? buffer.size() - offset : size)) {}
 
     BufferRange(const BufferRange&) = default;
     BufferRange(BufferRange&& other) = default;
@@ -1321,6 +1326,17 @@ struct BufferRange {
     operator bool() const
     {
         return size != 0;
+    }
+
+    // Sub-range. offset is relative to this range's start, not the buffer's.
+    BufferRange operator()(uint64_t offset, uint64_t size = EVA_WHOLE_SIZE) const
+    {
+        EVA_ASSERT(offset <= this->size);
+        if (size == EVA_WHOLE_SIZE)
+            size = this->size - offset;
+        EVA_ASSERT(offset + size <= this->size);
+
+        return {buffer, this->offset + offset, size};
     }
 
     void flush() const
