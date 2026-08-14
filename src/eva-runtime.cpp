@@ -4143,10 +4143,12 @@ DescriptorSet DescriptorSet::write(
                 
                 EVA_ASSERT(desc.buffer || impl().device.impl().features.nullDescriptor);
 
+                // VUID-VkDescriptorBufferInfo-buffer-02999: a null descriptor must
+                // carry offset 0 and VK_WHOLE_SIZE, whatever range it was built from.
                 bufferInfos.emplace_back(
                     desc.buffer ? desc.buffer.impl().vkBuffer : VK_NULL_HANDLE,
-                    desc.offset,
-                    desc.size
+                    desc.buffer ? desc.offset : 0,
+                    desc.buffer ? desc.size   : VK_WHOLE_SIZE
                 );
                 
             }
