@@ -1638,9 +1638,13 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         }
         else if (pImpl->vendorID == VENDOR_ID::NVIDIA)
         {
-            pImpl->architecture = qCoopMat && qCoopMat->cooperativeMatrix
-                ? Architecture::NVIDIA_POST_TURING
-                : Architecture::NVIDIA_PRE_TURING;
+            if (hasSmBuiltins)
+            {
+                if (smBuiltinsProps.shaderWarpsPerSM == 32u)
+                    pImpl->architecture = Architecture::NVIDIA_TURING;
+                else if (smBuiltinsProps.shaderWarpsPerSM == 48u)
+                    pImpl->architecture = Architecture::NVIDIA_POST_TURING;
+            }
         }
         else if (pImpl->vendorID == VENDOR_ID::INTEL)
         {

@@ -589,8 +589,8 @@ enum class DRIVER_ID : uint32_t {
 enum class Architecture : uint32_t {
     NONE = 0,
     // NVIDIA
-    NVIDIA_PRE_TURING   = (VENDOR_ID::NVIDIA << 16) | 0x0000,
-    NVIDIA_POST_TURING  = (VENDOR_ID::NVIDIA << 16) | 0x0001,   // include turing architecture.
+    NVIDIA_TURING       = (VENDOR_ID::NVIDIA << 16) | 0x0001,
+    NVIDIA_POST_TURING  = (VENDOR_ID::NVIDIA << 16) | 0x0002,
 
     //AMD
     AMD_GCN             = (VENDOR_ID::AMD << 16) | 0x0000,
