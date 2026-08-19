@@ -586,6 +586,23 @@ enum class DRIVER_ID : uint32_t {
     MAX_ENUM                      = 0x7FFFFFFF,
 };
 
+enum class Architecture : uint32_t {
+    NONE = 0,
+    // NVIDIA
+    NVIDIA_PRE_TURING   = (VENDOR_ID::NVIDIA << 16) | 0x0000,
+    NVIDIA_POST_TURING  = (VENDOR_ID::NVIDIA << 16) | 0x0001,   // include turing architecture.
+
+    //AMD
+    AMD_GCN             = (VENDOR_ID::AMD << 16) | 0x0000,
+    AMD_RDNA1           = (VENDOR_ID::AMD << 16) | 0x0001,
+    AMD_RDNA2           = (VENDOR_ID::AMD << 16) | 0x0002,
+    AMD_RDNA3           = (VENDOR_ID::AMD << 16) | 0x0003,
+    AMD_RDNA4           = (VENDOR_ID::AMD << 16) | 0x0004,
+
+    //INTEL
+    INTEL_XE1           = (VENDOR_ID::INTEL << 16) | 0x0001,
+    INTEL_XE2           = (VENDOR_ID::INTEL << 16) | 0x0002,
+};
 
 enum class PRESENT_MODE : uint32_t {
     IMMEDIATE               = 0,
