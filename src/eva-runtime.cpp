@@ -960,7 +960,6 @@ struct ArchFingerprint
     uint32_t maxSubgroupSize;
     uint32_t warpsPerSM;          // NV SM builtins
     uint32_t wavefrontsPerSimd;   // AMD shader core
-    bool fp8CoopMat;              // VK_EXT_shader_float8 cooperative matrix
     bool mixedDp4a;               // packed 4x8 mixed-signedness dot accelerated
     bool signedDp4a;              // packed 4x8 signed dot accelerated
 };
@@ -976,9 +975,8 @@ static Architecture detectArchitecture(const ArchFingerprint& fp)
             return Architecture::AMD_GCN;
         if (fp.minSubgroupSize == 32u && fp.maxSubgroupSize == 64u)
         {
-            if (fp.fp8CoopMat)                return Architecture::AMD_RDNA4;
             if (fp.wavefrontsPerSimd == 20u)  return Architecture::AMD_RDNA1;
-            if (fp.mixedDp4a)                 return Architecture::AMD_RDNA3;
+            if (fp.mixedDp4a)                 return Architecture::AMD_POST_RDNA2;
             return Architecture::AMD_RDNA2;
         }
     }
@@ -1101,12 +1099,6 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto* qCoopMat = !supportsExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceCooperativeMatrixFeaturesKHR{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
-        });
-
-    // Provided by VK_EXT_shader_float8
-    auto* qFloat8 = !supportsExt(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME)
-        ? nullptr : &queryChain.add(VkPhysicalDeviceShaderFloat8FeaturesEXT{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
         });
 
     // Provided by VK_VERSION_1_2 (required by cooperative matrix's GL_KHR_memory_scope_semantics / VulkanMemoryModel capability)
@@ -1665,7 +1657,6 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .maxSubgroupSize   = pImpl->maxSubgroupSize,
             .warpsPerSM        = hasSmBuiltins ? smBuiltinsProps.shaderWarpsPerSM : 0,
             .wavefrontsPerSimd = hasAmdShaderCoreProps ? amdShaderCoreProps.wavefrontsPerSimd : 0,
-            .fp8CoopMat        = bool(qFloat8 && qFloat8->shaderFloat8CooperativeMatrix),
             .mixedDp4a         = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated),
             .signedDp4a        = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated),
         });
