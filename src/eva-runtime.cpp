@@ -343,6 +343,7 @@ struct Device::Impl {
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
     DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
+    Architecture architecture = Architecture::NONE;
     uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
     std::array<uint32_t, 3> maxComputeWorkGroupCount = {};   // VkPhysicalDeviceLimits.maxComputeWorkGroupCount
     uint32_t maxComputeSharedMemorySize = 0;                 // VkPhysicalDeviceLimits.maxComputeSharedMemorySize
@@ -953,7 +954,7 @@ static uint32_t intelCoreClusterCount(uint32_t deviceID)
 Device Runtime::createDevice(const DeviceSettings& settings)
 {
     auto physicalDevices = arrayFrom(vkEnumeratePhysicalDevices, impl().instance);
-    
+
     printf("**************************************************************\n");
     printf("Detected %zu physical devices:\n", physicalDevices.size());
     for (uint32_t i = 0; i < physicalDevices.size(); ++i) 
@@ -1056,6 +1057,12 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto* qCoopMat = !supportsExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceCooperativeMatrixFeaturesKHR{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        });
+
+    // Provided by VK_EXT_shader_float8
+    auto* qFloat8 = !supportsExt(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDeviceShaderFloat8FeaturesEXT{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
         });
 
     // Provided by VK_VERSION_1_2 (required by cooperative matrix's GL_KHR_memory_scope_semantics / VulkanMemoryModel capability)
@@ -1562,24 +1569,37 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
             .pNext = &subgroupSizeCtrlProps,
         };
+        VkPhysicalDeviceShaderIntegerDotProductProperties integerDotProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
+            .pNext = &subgroupProps,
+        };
         VkPhysicalDeviceProperties2 props2{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-            .pNext = &subgroupProps,
+            .pNext = &integerDotProps,
         };
 
         // Core-cluster count sources (selection order ported from ggml-vulkan).
         VkPhysicalDeviceShaderSMBuiltinsPropertiesNV smBuiltinsProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV,
         };
+        VkPhysicalDeviceShaderCorePropertiesAMD amdShaderCoreProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD,
+        };
         VkPhysicalDeviceShaderCoreProperties2AMD amdCoreProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_2_AMD,
         };
-        const bool hasSmBuiltins   = supportsExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
+        const bool hasSmBuiltins = supportsExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
+        const bool hasAmdShaderCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME);
         const bool hasAmdCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME);
         if (hasSmBuiltins)
         {
             smBuiltinsProps.pNext = props2.pNext;
             props2.pNext = &smBuiltinsProps;
+        }
+        if (hasAmdShaderCoreProps)
+        {
+            amdShaderCoreProps.pNext = props2.pNext;
+            props2.pNext = &amdShaderCoreProps;
         }
         if (hasAmdCoreProps)
         {
@@ -1594,6 +1614,45 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->vendorID = props2.properties.vendorID;
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
+
+        if (pImpl->vendorID == VENDOR_ID::AMD)
+        {
+            if (hasAmdShaderCoreProps)
+            {
+                if (pImpl->minSubgroupSize == 64u && pImpl->maxSubgroupSize == 64u)
+                {
+                    pImpl->architecture = Architecture::AMD_GCN;
+                }
+                else if (pImpl->minSubgroupSize == 32u && pImpl->maxSubgroupSize == 64u)
+                {
+                    if (qFloat8 && qFloat8->shaderFloat8CooperativeMatrix)
+                        pImpl->architecture = Architecture::AMD_RDNA4;
+                    else if (amdShaderCoreProps.wavefrontsPerSimd == 20u)
+                        pImpl->architecture = Architecture::AMD_RDNA1;
+                    else if (integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated)
+                        pImpl->architecture = Architecture::AMD_RDNA3;
+                    else
+                        pImpl->architecture = Architecture::AMD_RDNA2;
+                }
+            }
+        }
+        else if (pImpl->vendorID == VENDOR_ID::NVIDIA)
+        {
+            if (hasSmBuiltins)
+            {
+                if (smBuiltinsProps.shaderWarpsPerSM == 32u)
+                    pImpl->architecture = Architecture::NVIDIA_TURING;
+                else
+                    pImpl->architecture = Architecture::NVIDIA_POST_TURING;
+            }
+        }
+        else if (pImpl->vendorID == VENDOR_ID::INTEL)
+        {
+            if (pImpl->minSubgroupSize == 16u)
+                pImpl->architecture = Architecture::INTEL_XE2;
+            else if (pImpl->minSubgroupSize == 8u && integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated)
+                pImpl->architecture = Architecture::INTEL_XE1;
+        }
 
         // Arithmetic ops are only usable where the compute stage is one of the
         // stages the device reports subgroup support for.
@@ -1889,6 +1948,11 @@ uint32_t Device::deviceID() const
 DRIVER_ID Device::driverID() const
 {
     return impl().driverID;
+}
+
+Architecture Device::architectureID() const
+{
+    return impl().architecture;
 }
 
 uint32_t Device::coreClusterCount() const

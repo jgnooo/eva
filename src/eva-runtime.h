@@ -342,6 +342,7 @@ public:
     uint32_t vendorID() const;
     uint32_t deviceID() const;
     DRIVER_ID driverID() const;
+    Architecture architectureID() const;
     // Shader core-cluster count (NVIDIA SM / AMD CU(instead of WGP) / Intel Xe-core); 0 when unknown.
     uint32_t coreClusterCount() const;
     // Max workgroup count a dispatch may use, per grid axis
