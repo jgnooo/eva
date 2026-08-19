@@ -335,7 +335,6 @@ public:
     // (VkPhysicalDeviceSubgroupSizeControlProperties).
     uint32_t minSubgroupSize() const;
     uint32_t maxSubgroupSize() const;
-    bool supportsSubgroupSizeControl() const;
     // True if compute shaders may use the subgroup arithmetic ops
     // (subgroupAdd / Mul / Min / Max and their variants).
     bool supportsSubgroupArithmetic() const;

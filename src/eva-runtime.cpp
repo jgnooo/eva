@@ -1926,11 +1926,6 @@ uint32_t Device::maxSubgroupSize() const
     return impl().maxSubgroupSize;
 }
 
-bool Device::supportsSubgroupSizeControl() const
-{
-    return impl().features.subgroupSizeControl;
-}
-
 bool Device::supportsSubgroupArithmetic() const
 {
     return impl().subgroupArithmetic;
