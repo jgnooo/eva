@@ -951,95 +951,46 @@ static uint32_t intelCoreClusterCount(uint32_t deviceID)
     }
 }
 
-// Architecture from Vulkan feature fingerprints, not device-id tables — new
-// devices of a known generation classify without a list update. Queries what
-// it needs from the physical device itself. NONE when the fingerprint is
-// inconclusive; callers must handle it.
-static Architecture detectArchitecture(VkPhysicalDevice pd)
+// Fingerprints detectArchitecture() reads, gathered by createDevice's one
+// property sweep. 0 on the counters means the source extension is absent.
+struct ArchFingerprint
 {
-    auto supportedExtensions = arrayFrom(vkEnumerateDeviceExtensionProperties, pd, nullptr);
-    auto supportsExt = [&](const char* name) {
-        return std::any_of(supportedExtensions.begin(), supportedExtensions.end(), [&](const auto& ext) {
-            return strcmp(name, ext.extensionName) == 0;
-        });
-    };
-    const bool hasSmBuiltins     = supportsExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
-    const bool hasAmdShaderCore  = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME);
+    uint32_t vendorID;
+    uint32_t minSubgroupSize;
+    uint32_t maxSubgroupSize;
+    uint32_t warpsPerSM;          // NV SM builtins
+    uint32_t wavefrontsPerSimd;   // AMD shader core
+    bool fp8CoopMat;              // VK_EXT_shader_float8 cooperative matrix
+    bool mixedDp4a;               // packed 4x8 mixed-signedness dot accelerated
+    bool signedDp4a;              // packed 4x8 signed dot accelerated
+};
 
-    VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeCtrlProps{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES,
-    };
-    VkPhysicalDeviceShaderIntegerDotProductProperties dotProps{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
-        .pNext = &subgroupSizeCtrlProps,
-    };
-    VkPhysicalDeviceShaderSMBuiltinsPropertiesNV smBuiltinsProps{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV,
-    };
-    VkPhysicalDeviceShaderCorePropertiesAMD amdShaderCoreProps{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD,
-    };
-    VkPhysicalDeviceProperties2 props2{
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-        .pNext = &dotProps,
-    };
-    if (hasSmBuiltins)
+// Architecture from Vulkan feature fingerprints, not device-id tables — new
+// devices of a known generation classify without a list update. NONE when the
+// fingerprint is inconclusive; callers must handle it.
+static Architecture detectArchitecture(const ArchFingerprint& fp)
+{
+    if (fp.vendorID == VENDOR_ID::AMD && fp.wavefrontsPerSimd != 0)
     {
-        smBuiltinsProps.pNext = props2.pNext;
-        props2.pNext = &smBuiltinsProps;
-    }
-    if (hasAmdShaderCore)
-    {
-        amdShaderCoreProps.pNext = props2.pNext;
-        props2.pNext = &amdShaderCoreProps;
-    }
-    vkGetPhysicalDeviceProperties2(pd, &props2);
-
-    const uint32_t vendorID         = props2.properties.vendorID;
-    const uint32_t minSubgroupSize  = subgroupSizeCtrlProps.minSubgroupSize;
-    const uint32_t maxSubgroupSize  = subgroupSizeCtrlProps.maxSubgroupSize;
-
-    // FP8 cooperative matrix (RDNA4 fingerprint) is a feature, not a property.
-    bool fp8CoopMat = false;
-    if (supportsExt(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME))
-    {
-        VkPhysicalDeviceShaderFloat8FeaturesEXT float8Features{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
-        };
-        VkPhysicalDeviceFeatures2 features2{
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-            .pNext = &float8Features,
-        };
-        vkGetPhysicalDeviceFeatures2(pd, &features2);
-        fp8CoopMat = float8Features.shaderFloat8CooperativeMatrix;
-    }
-
-    if (vendorID == VENDOR_ID::AMD && hasAmdShaderCore)
-    {
-        if (minSubgroupSize == 64u && maxSubgroupSize == 64u)
+        if (fp.minSubgroupSize == 64u && fp.maxSubgroupSize == 64u)
             return Architecture::AMD_GCN;
-        if (minSubgroupSize == 32u && maxSubgroupSize == 64u)
+        if (fp.minSubgroupSize == 32u && fp.maxSubgroupSize == 64u)
         {
-            if (fp8CoopMat)
-                return Architecture::AMD_RDNA4;
-            if (amdShaderCoreProps.wavefrontsPerSimd == 20u)
-                return Architecture::AMD_RDNA1;
-            if (dotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated)
-                return Architecture::AMD_RDNA3;
+            if (fp.fp8CoopMat)                return Architecture::AMD_RDNA4;
+            if (fp.wavefrontsPerSimd == 20u)  return Architecture::AMD_RDNA1;
+            if (fp.mixedDp4a)                 return Architecture::AMD_RDNA3;
             return Architecture::AMD_RDNA2;
         }
     }
-    else if (vendorID == VENDOR_ID::NVIDIA && hasSmBuiltins)
+    else if (fp.vendorID == VENDOR_ID::NVIDIA && fp.warpsPerSM != 0)
     {
-        return smBuiltinsProps.shaderWarpsPerSM == 32u ? Architecture::NVIDIA_TURING
-                                                       : Architecture::NVIDIA_POST_TURING;
+        return fp.warpsPerSM == 32u ? Architecture::NVIDIA_TURING
+                                    : Architecture::NVIDIA_POST_TURING;
     }
-    else if (vendorID == VENDOR_ID::INTEL)
+    else if (fp.vendorID == VENDOR_ID::INTEL)
     {
-        if (minSubgroupSize == 16u)
-            return Architecture::INTEL_XE2;
-        if (minSubgroupSize == 8u && dotProps.integerDotProduct4x8BitPackedSignedAccelerated)
-            return Architecture::INTEL_XE1;
+        if (fp.minSubgroupSize == 16u)                 return Architecture::INTEL_XE2;
+        if (fp.minSubgroupSize == 8u && fp.signedDp4a) return Architecture::INTEL_XE1;
     }
     return Architecture::NONE;
 }
@@ -1150,6 +1101,12 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto* qCoopMat = !supportsExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceCooperativeMatrixFeaturesKHR{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        });
+
+    // Provided by VK_EXT_shader_float8
+    auto* qFloat8 = !supportsExt(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDeviceShaderFloat8FeaturesEXT{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
         });
 
     // Provided by VK_VERSION_1_2 (required by cooperative matrix's GL_KHR_memory_scope_semantics / VulkanMemoryModel capability)
@@ -1656,24 +1613,37 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
             .pNext = &subgroupSizeCtrlProps,
         };
+        VkPhysicalDeviceShaderIntegerDotProductProperties integerDotProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
+            .pNext = &subgroupProps,
+        };
         VkPhysicalDeviceProperties2 props2{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-            .pNext = &subgroupProps,
+            .pNext = &integerDotProps,
         };
 
         // Core-cluster count sources (selection order ported from ggml-vulkan).
         VkPhysicalDeviceShaderSMBuiltinsPropertiesNV smBuiltinsProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV,
         };
+        VkPhysicalDeviceShaderCorePropertiesAMD amdShaderCoreProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD,
+        };
         VkPhysicalDeviceShaderCoreProperties2AMD amdCoreProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_2_AMD,
         };
         const bool hasSmBuiltins = supportsExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
+        const bool hasAmdShaderCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME);
         const bool hasAmdCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME);
         if (hasSmBuiltins)
         {
             smBuiltinsProps.pNext = props2.pNext;
             props2.pNext = &smBuiltinsProps;
+        }
+        if (hasAmdShaderCoreProps)
+        {
+            amdShaderCoreProps.pNext = props2.pNext;
+            props2.pNext = &amdShaderCoreProps;
         }
         if (hasAmdCoreProps)
         {
@@ -1689,7 +1659,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
 
-        pImpl->architecture = detectArchitecture(pd);
+        pImpl->architecture = detectArchitecture({
+            .vendorID          = pImpl->vendorID,
+            .minSubgroupSize   = pImpl->minSubgroupSize,
+            .maxSubgroupSize   = pImpl->maxSubgroupSize,
+            .warpsPerSM        = hasSmBuiltins ? smBuiltinsProps.shaderWarpsPerSM : 0,
+            .wavefrontsPerSimd = hasAmdShaderCoreProps ? amdShaderCoreProps.wavefrontsPerSimd : 0,
+            .fp8CoopMat        = bool(qFloat8 && qFloat8->shaderFloat8CooperativeMatrix),
+            .mixedDp4a         = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated),
+            .signedDp4a        = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated),
+        });
 
         // Arithmetic ops are only usable where the compute stage is one of the
         // stages the device reports subgroup support for.
