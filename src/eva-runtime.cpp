@@ -1642,7 +1642,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             {
                 if (smBuiltinsProps.shaderWarpsPerSM == 32u)
                     pImpl->architecture = Architecture::NVIDIA_TURING;
-                else if (smBuiltinsProps.shaderWarpsPerSM == 48u)
+                else
                     pImpl->architecture = Architecture::NVIDIA_POST_TURING;
             }
         }
