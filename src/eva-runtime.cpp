@@ -951,6 +951,47 @@ static uint32_t intelCoreClusterCount(uint32_t deviceID)
     }
 }
 
+// Architecture from Vulkan feature fingerprints, not device-id tables — new
+// devices of a known generation classify without a list update. NONE when the
+// fingerprint is inconclusive; callers must handle it.
+static Architecture detectArchitecture(
+    uint32_t vendorID,
+    uint32_t minSubgroupSize, uint32_t maxSubgroupSize,
+    bool fp8CoopMat,
+    const VkPhysicalDeviceShaderIntegerDotProductProperties& dotProps,
+    const VkPhysicalDeviceShaderSMBuiltinsPropertiesNV* smBuiltins,     // null: ext absent
+    const VkPhysicalDeviceShaderCorePropertiesAMD* amdShaderCore)       // null: ext absent
+{
+    if (vendorID == VENDOR_ID::AMD && amdShaderCore)
+    {
+        if (minSubgroupSize == 64u && maxSubgroupSize == 64u)
+            return Architecture::AMD_GCN;
+        if (minSubgroupSize == 32u && maxSubgroupSize == 64u)
+        {
+            if (fp8CoopMat)
+                return Architecture::AMD_RDNA4;
+            if (amdShaderCore->wavefrontsPerSimd == 20u)
+                return Architecture::AMD_RDNA1;
+            if (dotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated)
+                return Architecture::AMD_RDNA3;
+            return Architecture::AMD_RDNA2;
+        }
+    }
+    else if (vendorID == VENDOR_ID::NVIDIA && smBuiltins)
+    {
+        return smBuiltins->shaderWarpsPerSM == 32u ? Architecture::NVIDIA_TURING
+                                                   : Architecture::NVIDIA_POST_TURING;
+    }
+    else if (vendorID == VENDOR_ID::INTEL)
+    {
+        if (minSubgroupSize == 16u)
+            return Architecture::INTEL_XE2;
+        if (minSubgroupSize == 8u && dotProps.integerDotProduct4x8BitPackedSignedAccelerated)
+            return Architecture::INTEL_XE1;
+    }
+    return Architecture::NONE;
+}
+
 Device Runtime::createDevice(const DeviceSettings& settings)
 {
     auto physicalDevices = arrayFrom(vkEnumeratePhysicalDevices, impl().instance);
@@ -1615,44 +1656,13 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
 
-        if (pImpl->vendorID == VENDOR_ID::AMD)
-        {
-            if (hasAmdShaderCoreProps)
-            {
-                if (pImpl->minSubgroupSize == 64u && pImpl->maxSubgroupSize == 64u)
-                {
-                    pImpl->architecture = Architecture::AMD_GCN;
-                }
-                else if (pImpl->minSubgroupSize == 32u && pImpl->maxSubgroupSize == 64u)
-                {
-                    if (qFloat8 && qFloat8->shaderFloat8CooperativeMatrix)
-                        pImpl->architecture = Architecture::AMD_RDNA4;
-                    else if (amdShaderCoreProps.wavefrontsPerSimd == 20u)
-                        pImpl->architecture = Architecture::AMD_RDNA1;
-                    else if (integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated)
-                        pImpl->architecture = Architecture::AMD_RDNA3;
-                    else
-                        pImpl->architecture = Architecture::AMD_RDNA2;
-                }
-            }
-        }
-        else if (pImpl->vendorID == VENDOR_ID::NVIDIA)
-        {
-            if (hasSmBuiltins)
-            {
-                if (smBuiltinsProps.shaderWarpsPerSM == 32u)
-                    pImpl->architecture = Architecture::NVIDIA_TURING;
-                else
-                    pImpl->architecture = Architecture::NVIDIA_POST_TURING;
-            }
-        }
-        else if (pImpl->vendorID == VENDOR_ID::INTEL)
-        {
-            if (pImpl->minSubgroupSize == 16u)
-                pImpl->architecture = Architecture::INTEL_XE2;
-            else if (pImpl->minSubgroupSize == 8u && integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated)
-                pImpl->architecture = Architecture::INTEL_XE1;
-        }
+        pImpl->architecture = detectArchitecture(
+            pImpl->vendorID,
+            pImpl->minSubgroupSize, pImpl->maxSubgroupSize,
+            qFloat8 && qFloat8->shaderFloat8CooperativeMatrix,
+            integerDotProps,
+            hasSmBuiltins ? &smBuiltinsProps : nullptr,
+            hasAmdShaderCoreProps ? &amdShaderCoreProps : nullptr);
 
         // Arithmetic ops are only usable where the compute stage is one of the
         // stages the device reports subgroup support for.
