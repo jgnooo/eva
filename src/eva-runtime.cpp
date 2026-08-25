@@ -4334,6 +4334,11 @@ uint32_t QueryPool::queryCount() const
     return impl().queryCount;
 }
 
+float QueryPool::timestampPeriod() const
+{
+    return impl().timestampPeriod;
+}
+
 void QueryPool::reset(uint32_t firstQuery, uint32_t queryCount)
 {
     EVA_ASSERT(impl().device.impl().features.hostQueryReset);

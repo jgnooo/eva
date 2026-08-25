@@ -808,6 +808,8 @@ public:
     uint32_t queryCount() const;
     void reset(uint32_t firstQuery = 0, uint32_t queryCount = 0);
 
+    float timestampPeriod() const;   // nanoseconds per tick
+
     std::vector<uint64_t> getResults(uint32_t firstQuery=0, uint32_t queryCount = 0);
     double getElapsedMs(uint32_t startQuery, uint32_t endQuery);
 };
