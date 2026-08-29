@@ -342,6 +342,7 @@ struct Device::Impl {
 
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
+    DEVICE_TYPE deviceType = DEVICE_TYPE::OTHER;  // VkPhysicalDeviceProperties.deviceType
     DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
     Architecture architecture = Architecture::NONE;
     uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
@@ -1649,6 +1650,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->maxSubgroupSize = subgroupSizeCtrlProps.maxSubgroupSize;
         pImpl->vendorID = props2.properties.vendorID;
         pImpl->deviceID = props2.properties.deviceID;
+        pImpl->deviceType = (DEVICE_TYPE) props2.properties.deviceType;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
 
         pImpl->architecture = detectArchitecture({
@@ -1950,6 +1952,11 @@ uint32_t Device::vendorID() const
 uint32_t Device::deviceID() const
 {
     return impl().deviceID;
+}
+
+DEVICE_TYPE Device::deviceType() const
+{
+    return impl().deviceType;
 }
 
 DRIVER_ID Device::driverID() const
