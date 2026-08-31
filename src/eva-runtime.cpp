@@ -286,6 +286,7 @@ struct Device::Impl {
         bool subgroupSizeControl = false;
 
         bool hostQueryReset = false;
+        bool timelineSemaphore = false;
         bool pipelineExecutableInfo = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         bool performanceCounterQueryPools = false;
@@ -1065,6 +1066,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES,
     });
 
+    // Provided by VK_VERSION_1_2
+    auto& qTimelineSem = queryChain.add(VkPhysicalDeviceTimelineSemaphoreFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+    });
+
     // Provided by VK_EXT_shader_atomic_float
     auto* qAtomicFloat = !supportsExt(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceShaderAtomicFloatFeaturesEXT{
@@ -1325,6 +1331,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .hostQueryReset = VK_TRUE,
         });
         enabledFeatures.hostQueryReset = true;
+    }
+
+    // Provided by VK_VERSION_1_2
+    if (qTimelineSem.timelineSemaphore)
+    {
+        chain.add(VkPhysicalDeviceTimelineSemaphoreFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+            .timelineSemaphore = VK_TRUE,
+        });
+        enabledFeatures.timelineSemaphore = true;
     }
 
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
@@ -2080,7 +2096,7 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
                 VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                 nullptr,
                 inWaitSem.sem.impl().vkSemaphore,
-                0,
+                inWaitSem.value,
                 (VkPipelineStageFlags2)(uint64_t)inWaitSem.stage,
                 0
             );
@@ -2111,7 +2127,7 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
                 VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                 nullptr,
                 inSignalSem.sem.impl().vkSemaphore,
-                0,
+                inSignalSem.value,
                 (VkPipelineStageFlags2)(uint64_t)inSignalSem.stage,
                 0
             );
@@ -2124,25 +2140,36 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
 
 #else
     std::vector<VkSubmitInfo> submitInfos(batchCount, {VK_STRUCTURE_TYPE_SUBMIT_INFO});
+    std::vector<VkTimelineSemaphoreSubmitInfo> timelineInfos(batchCount, {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO});
 
     std::vector<VkSemaphore> waitSems; waitSems.reserve(waitSemCount);
     std::vector<VkPipelineStageFlags> waitStages; waitStages.reserve(waitSemCount);
+    std::vector<uint64_t> waitValues; waitValues.reserve(waitSemCount);
     std::vector<VkCommandBuffer> cmdBuffers; cmdBuffers.reserve(cmdBuffCount);
     std::vector<VkSemaphore> signalSems; signalSems.reserve(signalSemCount);
-    
-    for (uint32_t i=0; i<batchCount; ++i) 
+    std::vector<uint64_t> signalValues; signalValues.reserve(signalSemCount);
+
+    for (uint32_t i=0; i<batchCount; ++i)
     {
         const auto& [inWaitSems, inCmdBuffers, inSignalSems] = batches[i];
         VkSubmitInfo& info = submitInfos[i];
+
+        VkTimelineSemaphoreSubmitInfo& timelineInfo = timelineInfos[i];
+        info.pNext = &timelineInfo;
+        timelineInfo.waitSemaphoreValueCount = (uint32_t) inWaitSems.size();
+        timelineInfo.pWaitSemaphoreValues = waitValues.data() + waitSemOffset;
+        timelineInfo.signalSemaphoreValueCount = (uint32_t) inSignalSems.size();
+        timelineInfo.pSignalSemaphoreValues = signalValues.data() + signalSemOffset;
 
         info.waitSemaphoreCount = (uint32_t) inWaitSems.size();
         info.pWaitSemaphores = waitSems.data() + waitSemOffset;
         info.pWaitDstStageMask = waitStages.data() + waitSemOffset;
 
-        for (auto& inWaitSem : inWaitSems) 
+        for (auto& inWaitSem : inWaitSems)
         {
             waitSems.push_back(inWaitSem.sem.impl().vkSemaphore);
             waitStages.push_back((VkPipelineStageFlags)(uint32_t)(uint64_t)inWaitSem.stage);
+            waitValues.push_back(inWaitSem.value);
         }
         waitSemOffset += info.waitSemaphoreCount;
 
@@ -2159,9 +2186,10 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
 
         info.signalSemaphoreCount = (uint32_t) inSignalSems.size();
         info.pSignalSemaphores = signalSems.data() + signalSemOffset;
-        for (auto& inSignalSem : inSignalSems) 
+        for (auto& inSignalSem : inSignalSems)
         {
             signalSems.push_back(inSignalSem.sem.impl().vkSemaphore);
+            signalValues.push_back(inSignalSem.value);
         }
         signalSemOffset += info.signalSemaphoreCount;
     }
@@ -3027,6 +3055,56 @@ Semaphore Device::createSemaphore()
         vkHandle);
 
     return *impl().semaphores.insert(new Semaphore::Impl*(pImpl)).first;
+}
+
+TimelineSemaphore Device::createTimelineSemaphore(uint64_t initialValue)
+{
+    EVA_ASSERT(impl().features.timelineSemaphore);
+
+    VkSemaphoreTypeCreateInfo typeInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = initialValue,
+    };
+
+    auto vkHandle = create<VkSemaphore>(impl().vkDevice, {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &typeInfo,
+    });
+
+    auto pImpl = new Semaphore::Impl(
+        impl().vkDevice,
+        vkHandle);
+
+    return *impl().semaphores.insert(new Semaphore::Impl*(pImpl)).first;
+}
+
+uint64_t TimelineSemaphore::value() const
+{
+    uint64_t counter = 0;
+    ASSERT_SUCCESS(vkGetSemaphoreCounterValue(impl().vkDevice, impl().vkSemaphore, &counter));
+    return counter;
+}
+
+Result TimelineSemaphore::wait(uint64_t value, uint64_t timeout) const
+{
+    VkSemaphoreWaitInfo waitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .semaphoreCount = 1,
+        .pSemaphores = &impl().vkSemaphore,
+        .pValues = &value,
+    };
+    return (Result) vkWaitSemaphores(impl().vkDevice, &waitInfo, timeout);
+}
+
+void TimelineSemaphore::signal(uint64_t value) const
+{
+    VkSemaphoreSignalInfo signalInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+        .semaphore = impl().vkSemaphore,
+        .value = value,
+    };
+    ASSERT_SUCCESS(vkSignalSemaphore(impl().vkDevice, &signalInfo));
 }
 
 

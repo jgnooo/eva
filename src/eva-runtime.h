@@ -51,6 +51,7 @@ class CommandPool;
 class CommandBuffer;
 class Fence;
 class Semaphore;
+class TimelineSemaphore;
 
 class ShaderModule;
 class ComputePipeline;
@@ -80,6 +81,7 @@ class AccelerationStructure;
     friend class CommandBuffer; \
     friend class Fence; \
     friend class Semaphore; \
+    friend class TimelineSemaphore; \
     friend class ShaderModule; \
     friend class ComputePipeline; \
     friend class GraphicsPipeline; \
@@ -302,6 +304,7 @@ public:
     Result waitFences(std::vector<Fence> fences, bool waitAll, uint64_t timeout=uint64_t(-1));
     void resetFences(std::vector<Fence> fences);
     Semaphore createSemaphore();
+    TimelineSemaphore createTimelineSemaphore(uint64_t initialValue=0);
     ShaderModule createShaderModule(const ShaderModuleCreateInfo& info);
     ComputePipeline createComputePipeline(const ComputePipelineCreateInfo& info);
 
@@ -597,6 +600,18 @@ public:
 
     SemaphoreStage operator()(PIPELINE_STAGE stage) const;
 
+};
+
+
+class TimelineSemaphore : public Semaphore {
+public:
+    TimelineSemaphore(Semaphore::Impl** ppImpl=nullptr) : Semaphore(ppImpl) {}
+
+    SemaphoreStage operator()(uint64_t value, PIPELINE_STAGE stage=PIPELINE_STAGE::ALL_COMMANDS) const;
+
+    uint64_t value() const;
+    Result wait(uint64_t value, uint64_t timeout=uint64_t(-1)) const;
+    void signal(uint64_t value) const;
 };
 
 
@@ -1578,16 +1593,23 @@ inline ImageMemoryBarrier&& operator/(ImageMemoryBarrier&& barrier, SYNC_SCOPE m
 struct SemaphoreStage {
     const Semaphore sem;
     const PIPELINE_STAGE stage;
+    const uint64_t value;
 
     SemaphoreStage(
-        Semaphore sem, 
-        PIPELINE_STAGE stage=PIPELINE_STAGE::ALL_COMMANDS) 
-    : sem(sem), stage(stage) {}
+        Semaphore sem,
+        PIPELINE_STAGE stage=PIPELINE_STAGE::ALL_COMMANDS,
+        uint64_t value=0)
+    : sem(sem), stage(stage), value(value) {}
 };
 
 inline SemaphoreStage Semaphore::operator()(PIPELINE_STAGE stage) const
 {
     return {*this, stage};
+}
+
+inline SemaphoreStage TimelineSemaphore::operator()(uint64_t value, PIPELINE_STAGE stage) const
+{
+    return {*this, stage, value};
 }
 
 
