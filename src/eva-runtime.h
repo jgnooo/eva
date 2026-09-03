@@ -344,6 +344,7 @@ public:
     // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
     uint32_t vendorID() const;
     uint32_t deviceID() const;
+    DEVICE_TYPE deviceType() const;
     DRIVER_ID driverID() const;
     Architecture architectureID() const;
     // Shader core-cluster count (NVIDIA SM / AMD CU(instead of WGP) / Intel Xe-core); 0 when unknown.

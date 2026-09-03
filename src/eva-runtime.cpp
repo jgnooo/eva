@@ -10,6 +10,7 @@
 #include <set>
 #include <algorithm>// std::all_of, std::any_of
 #include <fstream>
+#include <iostream> // std::cin (device selection)
 #include "eva-native-factory.h"
 #include "eva-runtime.h"
 
@@ -343,6 +344,7 @@ struct Device::Impl {
 
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
+    DEVICE_TYPE deviceType = DEVICE_TYPE::OTHER;  // VkPhysicalDeviceProperties.deviceType
     DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
     Architecture architecture = Architecture::NONE;
     uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
@@ -1008,17 +1010,26 @@ Device Runtime::createDevice(const DeviceSettings& settings)
 
     if (physicalDevices.size() > 1)
     {
-        while(true)
+        // Read one line per attempt so nothing is left in stdin for the
+        // caller. EOF keeps the default; invalid input asks again.
+        const int last = (int)physicalDevices.size() - 1;
+        std::string line;
+        while (true)
         {
-            printf("Select a physical device (0-%d): ", (uint32_t)physicalDevices.size() - 1);
+            printf("Select a physical device (0-%d): ", last);
             fflush(stdout);
-            scanf("%d", &selected);
-            if (selected < 0 || selected >= (int)physicalDevices.size())
-            {            
-                fprintf(stderr, "Invalid index %d! Please select again.\n", selected);
-                continue;
+
+            if (!std::getline(std::cin, line))      // EOF: keep the default
+            {
+                selected = 0;
+                printf("\n");
+                break;
             }
-            break;
+            if (sscanf(line.c_str(), "%d", &selected) == 1
+                && 0 <= selected && selected <= last)
+                break;
+
+            fprintf(stderr, "Invalid selection! Please select again.\n");
         }
     }
 
@@ -1665,6 +1676,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->maxSubgroupSize = subgroupSizeCtrlProps.maxSubgroupSize;
         pImpl->vendorID = props2.properties.vendorID;
         pImpl->deviceID = props2.properties.deviceID;
+        pImpl->deviceType = (DEVICE_TYPE) props2.properties.deviceType;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
 
         pImpl->architecture = detectArchitecture({
@@ -1966,6 +1978,11 @@ uint32_t Device::vendorID() const
 uint32_t Device::deviceID() const
 {
     return impl().deviceID;
+}
+
+DEVICE_TYPE Device::deviceType() const
+{
+    return impl().deviceType;
 }
 
 DRIVER_ID Device::driverID() const

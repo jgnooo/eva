@@ -586,6 +586,16 @@ enum class DRIVER_ID : uint32_t {
     MAX_ENUM                      = 0x7FFFFFFF,
 };
 
+// VkPhysicalDeviceType, same values.
+enum class DEVICE_TYPE : uint32_t {
+    OTHER          = 0,
+    INTEGRATED_GPU = 1,
+    DISCRETE_GPU   = 2,
+    VIRTUAL_GPU    = 3,
+    CPU            = 4,
+    MAX_ENUM       = 0x7FFFFFFF,
+};
+
 enum class Architecture : uint32_t {
     NONE = 0,
     // NVIDIA
