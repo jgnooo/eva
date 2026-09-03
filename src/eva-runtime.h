@@ -1498,6 +1498,11 @@ inline MemoryBarrier operator/(SYNC_SCOPE mask1, SYNC_SCOPE mask2)
     return {mask1, mask2};
 }
 
+inline MemoryBarrier operator/(PIPELINE_STAGE stage1, PIPELINE_STAGE stage2)
+{
+    return {stage1, stage2};
+}
+
 
 struct BufferMemoryBarrier {
     SYNC_SCOPE srcMask = SYNC_SCOPE::NONE;
