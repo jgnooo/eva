@@ -1048,15 +1048,23 @@ Device Runtime::createDevice(const DeviceSettings& settings)
 {
     auto physicalDevices = arrayFrom(vkEnumeratePhysicalDevices, impl().instance);
 
-    printf("**************************************************************\n");
-    printf("Detected %zu physical devices:\n", physicalDevices.size());
-    for (uint32_t i = 0; i < physicalDevices.size(); ++i) 
-        printGpuInfo(i, physicalDevices[i]);
-    fflush(stdout);
+    if (!settings.quiet)
+    {
+        printf("**************************************************************\n");
+        printf("Detected %zu physical devices:\n", physicalDevices.size());
+        for (uint32_t i = 0; i < physicalDevices.size(); ++i) 
+            printGpuInfo(i, physicalDevices[i]);
+        fflush(stdout);
+    }
 
     int selected = 0;
 
-    if (physicalDevices.size() > 1)
+    if (settings.physicalDeviceIndex >= 0)
+    {
+        EVA_ASSERT(settings.physicalDeviceIndex < (int)physicalDevices.size());
+        selected = settings.physicalDeviceIndex;
+    }
+    else if (physicalDevices.size() > 1)
     {
         // Read one line per attempt so nothing is left in stdin for the
         // caller. EOF keeps the default; invalid input asks again.
@@ -1081,9 +1089,17 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         }
     }
 
-    printf("[GPU %d] is Selected.\n", selected);
-    printf("**************************************************************\n\n");
-    fflush(stdout);
+    if (!settings.quiet)
+    {
+        printf("[GPU %d] is Selected.\n", selected);
+        printf("**************************************************************\n\n");
+        fflush(stdout);
+    }
+
+    // The Device remembers the index it was actually opened on, so a later
+    // device(settings) request for that index finds it.
+    DeviceSettings resolvedSettings = settings;
+    resolvedSettings.physicalDeviceIndex = selected;
 
     ///////////////////////////////////////////////////////////////////////////////////////////
     ///////////////////////////////////////////////////////////////////////////////////////////
@@ -1525,7 +1541,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             qfIndices[queue_transfer].push_back(i);
     }
 
-    if(qfIndices[queue_graphics].size() > 1) 
+    if(!settings.quiet && qfIndices[queue_graphics].size() > 1) 
     {
         printf("[Note] Multiple queue families supporting Graphics (and Compute) operations were detected:\n");
         for (uint32_t i : qfIndices[queue_graphics])
@@ -1533,7 +1549,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         printf("The first available queue family will be selected.\n");
     }
 
-    if(qfIndices[queue_compute].size() > 1) 
+    if(!settings.quiet && qfIndices[queue_compute].size() > 1) 
     {
         printf("[Note] Multiple queue families supporting Compute operations were detected:\n");
         for (uint32_t i : qfIndices[queue_compute])
@@ -1541,7 +1557,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         printf("The first available queue family will be selected.\n");
     }
 
-    if(qfIndices[queue_transfer].size() > 1) 
+    if(!settings.quiet && qfIndices[queue_transfer].size() > 1) 
     {
         printf("[Note] Multiple queue families supporting Transfer operations were detected:\n");
         for (uint32_t i : qfIndices[queue_transfer])
@@ -1692,7 +1708,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pd,
         vkDevice,
         *this,
-        settings,
+        resolvedSettings,
         qfIndex[queue_graphics],
         qfIndex[queue_compute],
         qfIndex[queue_transfer],

@@ -222,11 +222,17 @@ struct DeviceSettings {
 #ifdef EVA_ENABLE_RAYTRACING
     bool enableRaytracing;
 #endif
+    // Physical device to open, as indexed by vkEnumeratePhysicalDevices.
+    // -1 keeps the default behaviour (prompt on stdin when several are present).
+    int physicalDeviceIndex = -1;
+    // Suppress the device / queue-family report printed while creating the device.
+    bool quiet = false;
     // bool operator==(const DeviceSettings&) const = default;
     bool operator<=(const DeviceSettings& other) const {
         return (!enableGraphicsQueues || other.enableGraphicsQueues) &&
                (!enableComputeQueues  || other.enableComputeQueues)  &&
-               (!enableTransferQueues || other.enableTransferQueues)
+               (!enableTransferQueues || other.enableTransferQueues) &&
+               (physicalDeviceIndex < 0 || physicalDeviceIndex == other.physicalDeviceIndex)
 #ifdef EVA_ENABLE_WINDOW
                && (!enableWindow      || other.enableWindow)
 #endif
