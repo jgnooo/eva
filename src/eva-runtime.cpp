@@ -10,6 +10,7 @@
 #include <set>
 #include <algorithm>// std::all_of, std::any_of
 #include <fstream>
+#include <iostream> // std::cin (device selection)
 #include "eva-native-factory.h"
 #include "eva-runtime.h"
 
@@ -85,6 +86,11 @@ eva::SpvBlob eva::SpvBlob::readFrom(const char* filepath)
 
 
 PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHR_ = nullptr;
+
+// VK_KHR_pipeline_executable_properties
+PFN_vkGetPipelineExecutablePropertiesKHR vkGetPipelineExecutableProperties_ = nullptr;
+PFN_vkGetPipelineExecutableStatisticsKHR vkGetPipelineExecutableStatistics_ = nullptr;
+PFN_vkGetPipelineExecutableInternalRepresentationsKHR vkGetPipelineExecutableInternalRepresentations_ = nullptr;
 
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
 // VK_KHR_performance_query
@@ -241,8 +247,8 @@ static std::pair<VkMemoryAllocateInfo, VkMemoryPropertyFlags> getMemoryAllocInfo
         vkGetBufferMemoryRequirements(device, resource, &memRequirements);  // It should be removed for performance!
     else if constexpr (std::is_same_v<VkResource, VkImage>)
         vkGetImageMemoryRequirements(device, resource, &memRequirements);
-    else 
-        static_assert(false, "Invalid VkResource type");
+    else
+        EVA_ASSERT(false);
 
     /*
     In Vulkan specification, the memoryTypes array is ordered by the following rules:
@@ -297,6 +303,7 @@ struct Device::Impl {
         bool synchronization2 = false;
         bool dynamicRendering = false;
         bool nullDescriptor = false;
+        bool pipelineRobustness = false;
         bool graphicsPipelineLibrary = false;
 
         bool shaderFloat16 = false;
@@ -306,11 +313,14 @@ struct Device::Impl {
         bool cooperativeMatrix = false;
         bool vulkanMemoryModel = false;
         bool maintenance4 = false;
+        bool subgroupSizeControl = false;
 
         bool scalarBlockLayout = false;
         bool shaderInt64 = false;
 
         bool hostQueryReset = false;
+        bool timelineSemaphore = false;
+        bool pipelineExecutableInfo = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         bool performanceCounterQueryPools = false;
 #endif
@@ -360,7 +370,20 @@ struct Device::Impl {
         std::vector<Device::CooperativeMatrixProperties> shapes;
     } coopMat;
 
-    uint32_t subgroupSize = 0;   // VkPhysicalDeviceSubgroupProperties.subgroupSize
+    uint32_t subgroupSize = 0;      // VkPhysicalDeviceSubgroupProperties.subgroupSize
+    uint32_t minSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.minSubgroupSize
+    uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
+    bool subgroupArithmetic = false;   // ARITHMETIC op class usable from compute shaders
+
+    uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
+    uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
+    DEVICE_TYPE deviceType = DEVICE_TYPE::OTHER;  // VkPhysicalDeviceProperties.deviceType
+    DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
+    Architecture architecture = Architecture::NONE;
+    uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
+    std::array<uint32_t, 3> maxComputeWorkGroupCount = {};   // VkPhysicalDeviceLimits.maxComputeWorkGroupCount
+    uint32_t maxComputeSharedMemorySize = 0;                 // VkPhysicalDeviceLimits.maxComputeSharedMemorySize
+    uint32_t minStorageBufferOffsetAlignment = 1;            // VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment
 
     CommandPool defaultCmdPool[queue_max][8] = {};
 
@@ -959,10 +982,72 @@ struct PNextChain {
     }
 };
 
+// Intel Xe-core counts by PCI device id — Intel exposes no Vulkan query for
+// this. Ported from ggml-vulkan (ggml_vk_intel_shader_core_count); unlisted
+// devices (integrated Arc included) resolve to 0.
+static uint32_t intelCoreClusterCount(uint32_t deviceID)
+{
+    switch (deviceID) {
+        case 0x56A6:                            return 6;    // A310
+        case 0x5693: case 0x56A5: case 0x56B1:  return 8;    // A370M / A380 / Pro A40/A50
+        case 0x5697:                            return 12;   // A530M
+        case 0x5692: case 0x56B3:               return 16;   // A550M / Pro A60
+        case 0x56A2:                            return 24;   // A580
+        case 0x5691: case 0x56A1:               return 28;   // A730M / A750
+        case 0x56A0: case 0x5690:               return 32;   // A770 / A770M
+        case 0xE212:                            return 16;   // Pro B50
+        case 0xE20C:                            return 18;   // B570
+        case 0xE20B: case 0xE211:               return 20;   // B580 / Pro B60
+        default:                                return 0;
+    }
+}
+
+// Fingerprints detectArchitecture() reads, gathered by createDevice's one
+// property sweep. 0 on the counters means the source extension is absent.
+struct ArchFingerprint
+{
+    uint32_t vendorID;
+    uint32_t minSubgroupSize;
+    uint32_t maxSubgroupSize;
+    uint32_t warpsPerSM;          // NV SM builtins
+    uint32_t wavefrontsPerSimd;   // AMD shader core
+    bool mixedDp4a;               // packed 4x8 mixed-signedness dot accelerated
+    bool signedDp4a;              // packed 4x8 signed dot accelerated
+};
+
+// Architecture from Vulkan feature fingerprints, not device-id tables — new
+// devices of a known generation classify without a list update. NONE when the
+// fingerprint is inconclusive; callers must handle it.
+static Architecture detectArchitecture(const ArchFingerprint& fp)
+{
+    if (fp.vendorID == VENDOR_ID::AMD && fp.wavefrontsPerSimd != 0)
+    {
+        if (fp.minSubgroupSize == 64u && fp.maxSubgroupSize == 64u)
+            return Architecture::AMD_GCN;
+        if (fp.minSubgroupSize == 32u && fp.maxSubgroupSize == 64u)
+        {
+            if (fp.wavefrontsPerSimd == 20u)  return Architecture::AMD_RDNA1;
+            if (fp.mixedDp4a)                 return Architecture::AMD_POST_RDNA2;
+            return Architecture::AMD_RDNA2;
+        }
+    }
+    else if (fp.vendorID == VENDOR_ID::NVIDIA && fp.warpsPerSM != 0)
+    {
+        return fp.warpsPerSM == 32u ? Architecture::NVIDIA_TURING
+                                    : Architecture::NVIDIA_POST_TURING;
+    }
+    else if (fp.vendorID == VENDOR_ID::INTEL)
+    {
+        if (fp.minSubgroupSize == 16u)                 return Architecture::INTEL_XE2;
+        if (fp.minSubgroupSize == 8u && fp.signedDp4a) return Architecture::INTEL_XE1;
+    }
+    return Architecture::NONE;
+}
+
 Device Runtime::createDevice(const DeviceSettings& settings)
 {
     auto physicalDevices = arrayFrom(vkEnumeratePhysicalDevices, impl().instance);
-    
+
     printf("**************************************************************\n");
     printf("Detected %zu physical devices:\n", physicalDevices.size());
     for (uint32_t i = 0; i < physicalDevices.size(); ++i) 
@@ -973,17 +1058,26 @@ Device Runtime::createDevice(const DeviceSettings& settings)
 
     if (physicalDevices.size() > 1)
     {
-        while(true)
+        // Read one line per attempt so nothing is left in stdin for the
+        // caller. EOF keeps the default; invalid input asks again.
+        const int last = (int)physicalDevices.size() - 1;
+        std::string line;
+        while (true)
         {
-            printf("Select a physical device (0-%d): ", (uint32_t)physicalDevices.size() - 1);
+            printf("Select a physical device (0-%d): ", last);
             fflush(stdout);
-            scanf("%d", &selected);
-            if (selected < 0 || selected >= (int)physicalDevices.size())
-            {            
-                fprintf(stderr, "Invalid index %d! Please select again.\n", selected);
-                continue;
+
+            if (!std::getline(std::cin, line))      // EOF: keep the default
+            {
+                selected = 0;
+                printf("\n");
+                break;
             }
-            break;
+            if (sscanf(line.c_str(), "%d", &selected) == 1
+                && 0 <= selected && selected <= last)
+                break;
+
+            fprintf(stderr, "Invalid selection! Please select again.\n");
         }
     }
 
@@ -1036,6 +1130,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES,
     });
 
+    // Provided by VK_VERSION_1_2
+    auto& qTimelineSem = queryChain.add(VkPhysicalDeviceTimelineSemaphoreFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+    });
+
     // Provided by VK_EXT_shader_atomic_float
     auto* qAtomicFloat = !supportsExt(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceShaderAtomicFloatFeaturesEXT{
@@ -1046,6 +1145,18 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto* qRobustness2 = !supportsExt(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceRobustness2FeaturesEXT{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
+        });
+
+    // Provided by VK_EXT_pipeline_robustness
+    auto* qPipelineRobustness = !supportsExt(VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDevicePipelineRobustnessFeaturesEXT{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
+        });
+
+    // Provided by VK_KHR_pipeline_executable_properties
+    auto* qPipeExecProps = !supportsExt(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
         });
 
     // Provided by VK_EXT_graphics_pipeline_library
@@ -1073,6 +1184,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     // Provided by VK_VERSION_1_2 (scalar block layout: vec3 SSBO arrays / GL_EXT_scalar_block_layout)
     auto& qScalarBlockLayout = queryChain.add(VkPhysicalDeviceScalarBlockLayoutFeatures{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES,
+    });
+
+    // Provided by VK_VERSION_1_3 (required for ComputePipelineCreateInfo::requiredSubgroupSize)
+    auto& qSubgroupSizeCtrl = queryChain.add(VkPhysicalDeviceSubgroupSizeControlFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
     });
 
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
@@ -1189,6 +1305,36 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         }
     }
 
+    // Provided by VK_EXT_pipeline_robustness
+    if (qPipelineRobustness)
+    {
+        reqExtentions.push_back(VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
+
+        if (qPipelineRobustness->pipelineRobustness)
+        {
+            chain.add(VkPhysicalDevicePipelineRobustnessFeaturesEXT{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
+                .pipelineRobustness = VK_TRUE,
+            });
+            enabledFeatures.pipelineRobustness = true;
+        }
+    }
+
+    // Provided by VK_KHR_pipeline_executable_properties
+    if (qPipeExecProps)
+    {
+        reqExtentions.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+
+        if (qPipeExecProps->pipelineExecutableInfo)
+        {
+            chain.add(VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+                .pipelineExecutableInfo = VK_TRUE,
+            });
+            enabledFeatures.pipelineExecutableInfo = true;
+        }
+    }
+
     // Provided by VK_KHR_pipeline_library + VK_EXT_graphics_pipeline_library
     if (qGpl)
     {
@@ -1245,6 +1391,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         enabledFeatures.scalarBlockLayout = true;
     }
 
+    // Provided by VK_VERSION_1_3 (enables VkPipelineShaderStageRequiredSubgroupSizeCreateInfo)
+    if (qSubgroupSizeCtrl.subgroupSizeControl)
+    {
+        chain.add(VkPhysicalDeviceSubgroupSizeControlFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+            .subgroupSizeControl = VK_TRUE,
+        });
+        enabledFeatures.subgroupSizeControl = true;
+    }
+
     // Provided by VK_VERSION_1_2
     if (qFloat16Int8.shaderFloat16)
     {
@@ -1273,6 +1429,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .hostQueryReset = VK_TRUE,
         });
         enabledFeatures.hostQueryReset = true;
+    }
+
+    // Provided by VK_VERSION_1_2
+    if (qTimelineSem.timelineSemaphore)
+    {
+        chain.add(VkPhysicalDeviceTimelineSemaphoreFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+            .timelineSemaphore = VK_TRUE,
+        });
+        enabledFeatures.timelineSemaphore = true;
     }
 
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
@@ -1540,17 +1706,94 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         throw std::runtime_error("The selected physical device does not support synchronization2 feature, which is required by the runtime.");
     }
 
-    // Cache the device subgroup size (Vulkan 1.1 core).
+    // Cache the device identity and subgroup sizes (Vulkan 1.1 / 1.2 / 1.3 core).
     {
+        VkPhysicalDeviceDriverProperties driverProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+        };
+        VkPhysicalDeviceSubgroupSizeControlProperties subgroupSizeCtrlProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES,
+            .pNext = &driverProps,
+        };
         VkPhysicalDeviceSubgroupProperties subgroupProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+            .pNext = &subgroupSizeCtrlProps,
+        };
+        VkPhysicalDeviceShaderIntegerDotProductProperties integerDotProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
+            .pNext = &subgroupProps,
         };
         VkPhysicalDeviceProperties2 props2{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-            .pNext = &subgroupProps,
+            .pNext = &integerDotProps,
         };
+
+        // Core-cluster count sources (selection order ported from ggml-vulkan).
+        VkPhysicalDeviceShaderSMBuiltinsPropertiesNV smBuiltinsProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV,
+        };
+        VkPhysicalDeviceShaderCorePropertiesAMD amdShaderCoreProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD,
+        };
+        VkPhysicalDeviceShaderCoreProperties2AMD amdCoreProps{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_2_AMD,
+        };
+        const bool hasSmBuiltins = supportsExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
+        const bool hasAmdShaderCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME);
+        const bool hasAmdCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME);
+        if (hasSmBuiltins)
+        {
+            smBuiltinsProps.pNext = props2.pNext;
+            props2.pNext = &smBuiltinsProps;
+        }
+        if (hasAmdShaderCoreProps)
+        {
+            amdShaderCoreProps.pNext = props2.pNext;
+            props2.pNext = &amdShaderCoreProps;
+        }
+        if (hasAmdCoreProps)
+        {
+            amdCoreProps.pNext = props2.pNext;
+            props2.pNext = &amdCoreProps;
+        }
+
         vkGetPhysicalDeviceProperties2(pd, &props2);
         pImpl->subgroupSize = subgroupProps.subgroupSize;
+        pImpl->minSubgroupSize = subgroupSizeCtrlProps.minSubgroupSize;
+        pImpl->maxSubgroupSize = subgroupSizeCtrlProps.maxSubgroupSize;
+        pImpl->vendorID = props2.properties.vendorID;
+        pImpl->deviceID = props2.properties.deviceID;
+        pImpl->deviceType = (DEVICE_TYPE) props2.properties.deviceType;
+        pImpl->driverID = (DRIVER_ID) driverProps.driverID;
+
+        pImpl->architecture = detectArchitecture({
+            .vendorID          = pImpl->vendorID,
+            .minSubgroupSize   = pImpl->minSubgroupSize,
+            .maxSubgroupSize   = pImpl->maxSubgroupSize,
+            .warpsPerSM        = hasSmBuiltins ? smBuiltinsProps.shaderWarpsPerSM : 0,
+            .wavefrontsPerSimd = hasAmdShaderCoreProps ? amdShaderCoreProps.wavefrontsPerSimd : 0,
+            .mixedDp4a         = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated),
+            .signedDp4a        = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated),
+        });
+
+        // Arithmetic ops are only usable where the compute stage is one of the
+        // stages the device reports subgroup support for.
+        pImpl->subgroupArithmetic =
+            (subgroupProps.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)
+            && (subgroupProps.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT);
+
+        const VkPhysicalDeviceLimits& limits = props2.properties.limits;
+        for (uint32_t i = 0; i < pImpl->maxComputeWorkGroupCount.size(); ++i)
+            pImpl->maxComputeWorkGroupCount[i] = limits.maxComputeWorkGroupCount[i];
+        pImpl->maxComputeSharedMemorySize = limits.maxComputeSharedMemorySize;
+        pImpl->minStorageBufferOffsetAlignment = uint32_t(limits.minStorageBufferOffsetAlignment);
+
+        if (hasSmBuiltins)
+            pImpl->coreClusterCount = smBuiltinsProps.shaderSMCount;
+        else if (hasAmdCoreProps)
+            pImpl->coreClusterCount = amdCoreProps.activeComputeUnitCount;
+        else if (pImpl->vendorID == VENDOR_ID::INTEL)
+            pImpl->coreClusterCount = intelCoreClusterCount(pImpl->deviceID);
     }
 
     // Cache every cooperative-matrix shape the device reports.
@@ -1588,6 +1831,17 @@ Device Runtime::createDevice(const DeviceSettings& settings)
                 pImpl->coopMat.shapes.push_back(s);
             }
         }
+    }
+
+    // VK_KHR_pipeline_executable_properties function pointers
+    if (enabledFeatures.pipelineExecutableInfo)
+    {
+        vkGetPipelineExecutableProperties_ = (PFN_vkGetPipelineExecutablePropertiesKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkGetPipelineExecutablePropertiesKHR");
+        vkGetPipelineExecutableStatistics_ = (PFN_vkGetPipelineExecutableStatisticsKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkGetPipelineExecutableStatisticsKHR");
+        vkGetPipelineExecutableInternalRepresentations_ = (PFN_vkGetPipelineExecutableInternalRepresentationsKHR)
+            vkGetDeviceProcAddr(vkDevice, "vkGetPipelineExecutableInternalRepresentationsKHR");
     }
 
 #ifdef EVA_ENABLE_RAYTRACING
@@ -1780,6 +2034,11 @@ bool Device::supportsCooperativeMatrix() const
     return impl().features.cooperativeMatrix;
 }
 
+bool Device::supportsPipelineRobustness() const
+{
+    return impl().features.pipelineRobustness;
+}
+
 const std::vector<Device::CooperativeMatrixProperties>& Device::cooperativeMatrixProperties() const
 {
     return impl().coopMat.shapes;
@@ -1788,6 +2047,66 @@ const std::vector<Device::CooperativeMatrixProperties>& Device::cooperativeMatri
 uint32_t Device::subgroupSize() const
 {
     return impl().subgroupSize;
+}
+
+uint32_t Device::minSubgroupSize() const
+{
+    return impl().minSubgroupSize;
+}
+
+uint32_t Device::maxSubgroupSize() const
+{
+    return impl().maxSubgroupSize;
+}
+
+bool Device::supportsSubgroupArithmetic() const
+{
+    return impl().subgroupArithmetic;
+}
+
+uint32_t Device::vendorID() const
+{
+    return impl().vendorID;
+}
+
+uint32_t Device::deviceID() const
+{
+    return impl().deviceID;
+}
+
+DEVICE_TYPE Device::deviceType() const
+{
+    return impl().deviceType;
+}
+
+DRIVER_ID Device::driverID() const
+{
+    return impl().driverID;
+}
+
+Architecture Device::architectureID() const
+{
+    return impl().architecture;
+}
+
+uint32_t Device::coreClusterCount() const
+{
+    return impl().coreClusterCount;
+}
+
+std::array<uint32_t, 3> Device::maxComputeWorkGroupCount() const
+{
+    return impl().maxComputeWorkGroupCount;
+}
+
+uint32_t Device::maxComputeSharedMemorySize() const
+{
+    return impl().maxComputeSharedMemorySize;
+}
+
+uint32_t Device::minStorageBufferOffsetAlignment() const
+{
+    return impl().minStorageBufferOffsetAlignment;
 }
 
 
@@ -1888,7 +2207,7 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
                 VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                 nullptr,
                 inWaitSem.sem.impl().vkSemaphore,
-                0,
+                inWaitSem.value,
                 (VkPipelineStageFlags2)(uint64_t)inWaitSem.stage,
                 0
             );
@@ -1919,7 +2238,7 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
                 VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                 nullptr,
                 inSignalSem.sem.impl().vkSemaphore,
-                0,
+                inSignalSem.value,
                 (VkPipelineStageFlags2)(uint64_t)inSignalSem.stage,
                 0
             );
@@ -1932,25 +2251,36 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
 
 #else
     std::vector<VkSubmitInfo> submitInfos(batchCount, {VK_STRUCTURE_TYPE_SUBMIT_INFO});
+    std::vector<VkTimelineSemaphoreSubmitInfo> timelineInfos(batchCount, {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO});
 
     std::vector<VkSemaphore> waitSems; waitSems.reserve(waitSemCount);
     std::vector<VkPipelineStageFlags> waitStages; waitStages.reserve(waitSemCount);
+    std::vector<uint64_t> waitValues; waitValues.reserve(waitSemCount);
     std::vector<VkCommandBuffer> cmdBuffers; cmdBuffers.reserve(cmdBuffCount);
     std::vector<VkSemaphore> signalSems; signalSems.reserve(signalSemCount);
-    
-    for (uint32_t i=0; i<batchCount; ++i) 
+    std::vector<uint64_t> signalValues; signalValues.reserve(signalSemCount);
+
+    for (uint32_t i=0; i<batchCount; ++i)
     {
         const auto& [inWaitSems, inCmdBuffers, inSignalSems] = batches[i];
         VkSubmitInfo& info = submitInfos[i];
+
+        VkTimelineSemaphoreSubmitInfo& timelineInfo = timelineInfos[i];
+        info.pNext = &timelineInfo;
+        timelineInfo.waitSemaphoreValueCount = (uint32_t) inWaitSems.size();
+        timelineInfo.pWaitSemaphoreValues = waitValues.data() + waitSemOffset;
+        timelineInfo.signalSemaphoreValueCount = (uint32_t) inSignalSems.size();
+        timelineInfo.pSignalSemaphoreValues = signalValues.data() + signalSemOffset;
 
         info.waitSemaphoreCount = (uint32_t) inWaitSems.size();
         info.pWaitSemaphores = waitSems.data() + waitSemOffset;
         info.pWaitDstStageMask = waitStages.data() + waitSemOffset;
 
-        for (auto& inWaitSem : inWaitSems) 
+        for (auto& inWaitSem : inWaitSems)
         {
             waitSems.push_back(inWaitSem.sem.impl().vkSemaphore);
             waitStages.push_back((VkPipelineStageFlags)(uint32_t)(uint64_t)inWaitSem.stage);
+            waitValues.push_back(inWaitSem.value);
         }
         waitSemOffset += info.waitSemaphoreCount;
 
@@ -1967,9 +2297,10 @@ Queue Queue::submit(std::vector<SubmissionBatchInfo>&& batches, std::optional<Fe
 
         info.signalSemaphoreCount = (uint32_t) inSignalSems.size();
         info.pSignalSemaphores = signalSems.data() + signalSemOffset;
-        for (auto& inSignalSem : inSignalSems) 
+        for (auto& inSignalSem : inSignalSems)
         {
             signalSems.push_back(inSignalSem.sem.impl().vkSemaphore);
+            signalValues.push_back(inSignalSem.value);
         }
         signalSemOffset += info.signalSemaphoreCount;
     }
@@ -3026,6 +3357,56 @@ Semaphore Device::createSemaphore()
     return *impl().semaphores.insert(new Semaphore::Impl*(pImpl)).first;
 }
 
+TimelineSemaphore Device::createTimelineSemaphore(uint64_t initialValue)
+{
+    EVA_ASSERT(impl().features.timelineSemaphore);
+
+    VkSemaphoreTypeCreateInfo typeInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = initialValue,
+    };
+
+    auto vkHandle = create<VkSemaphore>(impl().vkDevice, {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &typeInfo,
+    });
+
+    auto pImpl = new Semaphore::Impl(
+        impl().vkDevice,
+        vkHandle);
+
+    return *impl().semaphores.insert(new Semaphore::Impl*(pImpl)).first;
+}
+
+uint64_t TimelineSemaphore::value() const
+{
+    uint64_t counter = 0;
+    ASSERT_SUCCESS(vkGetSemaphoreCounterValue(impl().vkDevice, impl().vkSemaphore, &counter));
+    return counter;
+}
+
+Result TimelineSemaphore::wait(uint64_t value, uint64_t timeout) const
+{
+    VkSemaphoreWaitInfo waitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .semaphoreCount = 1,
+        .pSemaphores = &impl().vkSemaphore,
+        .pValues = &value,
+    };
+    return (Result) vkWaitSemaphores(impl().vkDevice, &waitInfo, timeout);
+}
+
+void TimelineSemaphore::signal(uint64_t value) const
+{
+    VkSemaphoreSignalInfo signalInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+        .semaphore = impl().vkSemaphore,
+        .value = value,
+    };
+    ASSERT_SUCCESS(vkSignalSemaphore(impl().vkDevice, &signalInfo));
+}
+
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // ShaderModule
@@ -3242,11 +3623,45 @@ ComputePipeline Device::createComputePipeline(const ComputePipelineCreateInfo& i
 
     stageInfo.pSpecializationInfo = (VkSpecializationInfo*) spec.getInfo();
 
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSubgroupSizeInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+        .requiredSubgroupSize = info.requiredSubgroupSize,
+    };
+    if (info.requiredSubgroupSize != 0)
+    {
+        EVA_ASSERT(impl().features.subgroupSizeControl);
+        EVA_ASSERT((info.requiredSubgroupSize & (info.requiredSubgroupSize - 1)) == 0);
+        EVA_ASSERT(impl().minSubgroupSize <= info.requiredSubgroupSize
+                && info.requiredSubgroupSize <= impl().maxSubgroupSize);
+        stageInfo.pNext = &requiredSubgroupSizeInfo;
+    }
+
+    VkPipelineRobustnessCreateInfoEXT robustnessInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT,
+        .storageBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT,
+        .uniformBuffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT,
+        .vertexInputs   = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT_EXT,
+        .images         = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT_EXT,
+    };
+
     VkComputePipelineCreateInfo createInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = stageInfo,
         .layout = layout.impl().vkPipeLayout,
     };
+
+    if (info.robustBufferAccess)
+    {
+        EVA_ASSERT(impl().features.pipelineRobustness);
+        createInfo.pNext = &robustnessInfo;
+    }
+
+    if (info.captureStatistics)
+    {
+        EVA_ASSERT(impl().features.pipelineExecutableInfo);
+        createInfo.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR
+                          | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+    }
 
     VkPipeline vkHandle;
     ASSERT_SUCCESS(vkCreateComputePipelines(
@@ -3274,6 +3689,110 @@ PipelineLayout ComputePipeline::layout() const
 DescriptorSetLayout ComputePipeline::descSetLayout(uint32_t setId) const
 {
     return impl().layout.descSetLayout(setId);
+}
+
+std::vector<PipelineExecutable> ComputePipeline::executables() const
+{
+    if (!vkGetPipelineExecutableProperties_)
+        return {};
+
+    VkPipelineInfoKHR pipeInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR,
+        .pipeline = impl().vkPipeline,
+    };
+    uint32_t count = 0;
+    vkGetPipelineExecutableProperties_(impl().vkDevice, &pipeInfo, &count, nullptr);
+
+    std::vector<VkPipelineExecutablePropertiesKHR> props(count, {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR,
+    });
+    vkGetPipelineExecutableProperties_(impl().vkDevice, &pipeInfo, &count, props.data());
+
+    std::vector<PipelineExecutable> out;
+    out.reserve(count);
+    for (const auto& p : props)
+        out.push_back({ p.name, p.description, p.subgroupSize });
+    return out;
+}
+
+std::vector<PipelineStatistic> ComputePipeline::statistics() const
+{
+    if (!vkGetPipelineExecutableProperties_ || !vkGetPipelineExecutableStatistics_)
+        return {};
+
+    std::vector<PipelineStatistic> out;
+    const uint32_t execCount = (uint32_t) executables().size();
+
+    for (uint32_t e = 0; e < execCount; ++e)
+    {
+        VkPipelineExecutableInfoKHR execInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+            .pipeline = impl().vkPipeline,
+            .executableIndex = e,
+        };
+
+        uint32_t count = 0;
+        vkGetPipelineExecutableStatistics_(impl().vkDevice, &execInfo, &count, nullptr);
+        std::vector<VkPipelineExecutableStatisticKHR> stats(count, {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR,
+        });
+        vkGetPipelineExecutableStatistics_(impl().vkDevice, &execInfo, &count, stats.data());
+
+        for (const auto& s : stats)
+        {
+            std::string value;
+            switch (s.format)
+            {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:  value = s.value.b32 ? "true" : "false"; break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:   value = std::to_string(s.value.i64); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:  value = std::to_string(s.value.u64); break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: value = std::to_string(s.value.f64); break;
+            default: break;
+            }
+            out.push_back({ s.name, s.description, std::move(value) });
+        }
+    }
+    return out;
+}
+
+std::vector<PipelineInternalRepresentation> ComputePipeline::internalRepresentations() const
+{
+    if (!vkGetPipelineExecutableProperties_ || !vkGetPipelineExecutableInternalRepresentations_)
+        return {};
+
+    std::vector<PipelineInternalRepresentation> out;
+    const uint32_t execCount = (uint32_t) executables().size();
+
+    for (uint32_t e = 0; e < execCount; ++e)
+    {
+        VkPipelineExecutableInfoKHR execInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+            .pipeline = impl().vkPipeline,
+            .executableIndex = e,
+        };
+
+        // Three calls, not two: the count comes first, then a pass that fills
+        // in each dataSize, and only then can the buffers exist to write into.
+        uint32_t count = 0;
+        vkGetPipelineExecutableInternalRepresentations_(impl().vkDevice, &execInfo, &count, nullptr);
+        std::vector<VkPipelineExecutableInternalRepresentationKHR> irs(count, {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR,
+        });
+        vkGetPipelineExecutableInternalRepresentations_(impl().vkDevice, &execInfo, &count, irs.data());
+
+        std::vector<std::vector<uint8_t>> blobs(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            blobs[i].resize(irs[i].dataSize);
+            irs[i].pData = blobs[i].data();
+        }
+        vkGetPipelineExecutableInternalRepresentations_(impl().vkDevice, &execInfo, &count, irs.data());
+
+        for (uint32_t i = 0; i < count; ++i)
+            out.push_back({ irs[i].name, irs[i].description,
+                            irs[i].isText == VK_TRUE, std::move(blobs[i]) });
+    }
+    return out;
 }
 
 
@@ -4250,10 +4769,12 @@ DescriptorSet DescriptorSet::write(
                 
                 EVA_ASSERT(desc.buffer || impl().device.impl().features.nullDescriptor);
 
+                // VUID-VkDescriptorBufferInfo-buffer-02999: a null descriptor must
+                // carry offset 0 and VK_WHOLE_SIZE, whatever range it was built from.
                 bufferInfos.emplace_back(
                     desc.buffer ? desc.buffer.impl().vkBuffer : VK_NULL_HANDLE,
-                    desc.offset,
-                    desc.size
+                    desc.buffer ? desc.offset : 0,
+                    desc.buffer ? desc.size   : VK_WHOLE_SIZE
                 );
                 
             }
@@ -4366,6 +4887,11 @@ QueryPool Device::createTimestampQueryPool(uint32_t queryCount)
 uint32_t QueryPool::queryCount() const
 {
     return impl().queryCount;
+}
+
+float QueryPool::timestampPeriod() const
+{
+    return impl().timestampPeriod;
 }
 
 void QueryPool::reset(uint32_t firstQuery, uint32_t queryCount)

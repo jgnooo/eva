@@ -8,6 +8,7 @@
 #include <optional>
 #include <memory>
 #include <tuple>
+#include <array>
 #include <utility>
 #include <cstring>
 #include <functional>
@@ -50,6 +51,7 @@ class CommandPool;
 class CommandBuffer;
 class Fence;
 class Semaphore;
+class TimelineSemaphore;
 
 class ShaderModule;
 class ComputePipeline;
@@ -79,6 +81,7 @@ class AccelerationStructure;
     friend class CommandBuffer; \
     friend class Fence; \
     friend class Semaphore; \
+    friend class TimelineSemaphore; \
     friend class ShaderModule; \
     friend class ComputePipeline; \
     friend class GraphicsPipeline; \
@@ -314,6 +317,7 @@ public:
     Result waitFences(std::vector<Fence> fences, bool waitAll, uint64_t timeout=uint64_t(-1));
     void resetFences(std::vector<Fence> fences);
     Semaphore createSemaphore();
+    TimelineSemaphore createTimelineSemaphore(uint64_t initialValue=0);
     ShaderModule createShaderModule(const ShaderModuleCreateInfo& info);
     ComputePipeline createComputePipeline(const ComputePipelineCreateInfo& info);
     GraphicsPipeline createGraphicsPipeline(const GraphicsPipelineCreateInfo& info);
@@ -339,8 +343,35 @@ public:
     bool supportsCooperativeMatrix() const;
     // Every cooperative-matrix shape reported by the device (all type combos).
     const std::vector<CooperativeMatrixProperties>& cooperativeMatrixProperties() const;
+    // True if VK_EXT_pipeline_robustness is enabled
+    // (ComputePipelineCreateInfo::robustBufferAccess is usable).
+    bool supportsPipelineRobustness() const;
     // Device subgroup size (VkPhysicalDeviceSubgroupProperties.subgroupSize).
     uint32_t subgroupSize() const;
+    // Supported ComputePipelineCreateInfo::requiredSubgroupSize range
+    // (VkPhysicalDeviceSubgroupSizeControlProperties).
+    uint32_t minSubgroupSize() const;
+    uint32_t maxSubgroupSize() const;
+    // True if compute shaders may use the subgroup arithmetic ops
+    // (subgroupAdd / Mul / Min / Max and their variants).
+    bool supportsSubgroupArithmetic() const;
+    // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
+    uint32_t vendorID() const;
+    uint32_t deviceID() const;
+    DEVICE_TYPE deviceType() const;
+    DRIVER_ID driverID() const;
+    Architecture architectureID() const;
+    // Shader core-cluster count (NVIDIA SM / AMD CU(instead of WGP) / Intel Xe-core); 0 when unknown.
+    uint32_t coreClusterCount() const;
+    // Max workgroup count a dispatch may use, per grid axis
+    // (VkPhysicalDeviceLimits.maxComputeWorkGroupCount).
+    std::array<uint32_t, 3> maxComputeWorkGroupCount() const;
+    // Max total shared memory one workgroup may declare, in bytes
+    // (VkPhysicalDeviceLimits.maxComputeSharedMemorySize).
+    uint32_t maxComputeSharedMemorySize() const;
+    // Alignment a storage-buffer descriptor's offset must be a multiple of, in
+    // bytes (VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment).
+    uint32_t minStorageBufferOffsetAlignment() const;
 
     // Timestamp Query Pool
     bool supportsTimestampQueries() const;
@@ -628,6 +659,18 @@ public:
 };
 
 
+class TimelineSemaphore : public Semaphore {
+public:
+    TimelineSemaphore(Semaphore::Impl** ppImpl=nullptr) : Semaphore(ppImpl) {}
+
+    SemaphoreStage operator()(uint64_t value, PIPELINE_STAGE stage=PIPELINE_STAGE::ALL_COMMANDS) const;
+
+    uint64_t value() const;
+    Result wait(uint64_t value, uint64_t timeout=uint64_t(-1)) const;
+    void signal(uint64_t value) const;
+};
+
+
 class ShaderModule {
     VULKAN_CLASS_COMMON2(ShaderModule)
 public:
@@ -649,12 +692,51 @@ public:
 };
 
 
+// One compiled unit a pipeline turned into. How a pipeline splits is the
+// driver's call: a stage each, several stages merged, or the same shader once
+// per dispatch width. Statistics and internal representations are per
+// executable, not per pipeline, which is why they are indexed against this.
+struct PipelineExecutable {
+    std::string name;
+    std::string description;
+    uint32_t subgroupSize;
+};
+
+
+// One number the driver kept from compiling a pipeline. Names, units and which
+// numbers exist at all are the driver's own — Intel reports instruction and
+// memory-message counts, spill/fill, scratch size and dispatch width — so read
+// these as diagnostics, never as something to branch on.
+struct PipelineStatistic {
+    std::string name;
+    std::string description;
+    std::string value;   // rendered from whichever of the driver's four formats it used
+};
+
+
+// A compiler-internal form of the pipeline. On the drivers that expose one this
+// is the ISA disassembly, which is the only account of register allocation and
+// scheduling that is not a guess.
+struct PipelineInternalRepresentation {
+    std::string name;
+    std::string description;
+    bool isText;
+    std::vector<uint8_t> data;
+};
+
+
 class ComputePipeline {
     VULKAN_CLASS_COMMON2(ComputePipeline)
 public:
 
     PipelineLayout layout() const;
     DescriptorSetLayout descSetLayout(uint32_t setId=0) const;
+
+    // All three are empty unless the pipeline was created with captureStatistics
+    // and the device took VK_KHR_pipeline_executable_properties.
+    std::vector<PipelineExecutable> executables() const;
+    std::vector<PipelineStatistic> statistics() const;
+    std::vector<PipelineInternalRepresentation> internalRepresentations() const;
 };
 
 
@@ -802,6 +884,8 @@ class QueryPool {
 public:
     uint32_t queryCount() const;
     void reset(uint32_t firstQuery = 0, uint32_t queryCount = 0);
+
+    float timestampPeriod() const;   // nanoseconds per tick
 
     std::vector<uint64_t> getResults(uint32_t firstQuery=0, uint32_t queryCount = 0);
     double getElapsedMs(uint32_t startQuery, uint32_t endQuery);
@@ -1140,6 +1224,12 @@ struct ComputePipelineCreateInfo {
     ShaderStage csStage;
     std::optional<PipelineLayout> layout;
     bool autoLayoutAllowAllStages = false;
+    uint32_t requiredSubgroupSize = 0;
+    bool robustBufferAccess = false;   // per-pipeline robust storage/uniform buffer access (VK_EXT_pipeline_robustness)
+    // Keep the compiler's statistics and internal representations queryable
+    // (VK_KHR_pipeline_executable_properties). The spec lets a driver compile
+    // differently when this is set, so leave it off for anything being timed.
+    bool captureStatistics = false;
 };
 
 
@@ -1336,12 +1426,14 @@ struct BufferRange {
     , offset(0)
     , size(0) {};
     
-    BufferRange(Buffer buffer, 
-        uint64_t offset=0, 
+    // The null-buffer guard is load-bearing: Buffer::size() derefs an impl a null
+    // buffer does not have. A null Buffer is how callers spell an absent binding.
+    BufferRange(Buffer buffer,
+        uint64_t offset=0,
         uint64_t size=EVA_WHOLE_SIZE)
     : buffer(buffer)
     , offset(offset)
-    , size(size==EVA_WHOLE_SIZE ? buffer.size() - offset : size) {}
+    , size(!buffer ? 0 : (size==EVA_WHOLE_SIZE ? buffer.size() - offset : size)) {}
 
     BufferRange(const BufferRange&) = default;
     BufferRange(BufferRange&& other) = default;
@@ -1361,6 +1453,17 @@ struct BufferRange {
     operator bool() const
     {
         return size != 0;
+    }
+
+    // Sub-range. offset is relative to this range's start, not the buffer's.
+    BufferRange operator()(uint64_t offset, uint64_t size = EVA_WHOLE_SIZE) const
+    {
+        EVA_ASSERT(offset <= this->size);
+        if (size == EVA_WHOLE_SIZE)
+            size = this->size - offset;
+        EVA_ASSERT(offset + size <= this->size);
+
+        return {buffer, this->offset + offset, size};
     }
 
     void flush() const
@@ -1503,6 +1606,11 @@ inline MemoryBarrier operator/(SYNC_SCOPE mask1, SYNC_SCOPE mask2)
     return {mask1, mask2};
 }
 
+inline MemoryBarrier operator/(PIPELINE_STAGE stage1, PIPELINE_STAGE stage2)
+{
+    return {stage1, stage2};
+}
+
 
 struct BufferMemoryBarrier {
     SYNC_SCOPE srcMask = SYNC_SCOPE::NONE;
@@ -1599,16 +1707,23 @@ inline ImageMemoryBarrier&& operator/(ImageMemoryBarrier&& barrier, SYNC_SCOPE m
 struct SemaphoreStage {
     const Semaphore sem;
     const PIPELINE_STAGE stage;
+    const uint64_t value;
 
     SemaphoreStage(
-        Semaphore sem, 
-        PIPELINE_STAGE stage=PIPELINE_STAGE::ALL_COMMANDS) 
-    : sem(sem), stage(stage) {}
+        Semaphore sem,
+        PIPELINE_STAGE stage=PIPELINE_STAGE::ALL_COMMANDS,
+        uint64_t value=0)
+    : sem(sem), stage(stage), value(value) {}
 };
 
 inline SemaphoreStage Semaphore::operator()(PIPELINE_STAGE stage) const
 {
     return {*this, stage};
+}
+
+inline SemaphoreStage TimelineSemaphore::operator()(uint64_t value, PIPELINE_STAGE stage) const
+{
+    return {*this, stage, value};
 }
 
 
