@@ -936,6 +936,37 @@ Device Runtime::device(DeviceSettings settings)
     return createDevice(settings);
 }
 
+std::vector<PhysicalDeviceInfo> Runtime::physicalDevices() const
+{
+    auto physicalDevices = arrayFrom(vkEnumeratePhysicalDevices, impl().instance);
+
+    std::vector<PhysicalDeviceInfo> infos;
+    infos.reserve(physicalDevices.size());
+    for (uint32_t i = 0; i < physicalDevices.size(); ++i)
+    {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physicalDevices[i], &props);
+        VkPhysicalDeviceMemoryProperties mem = getMemorySpec(physicalDevices[i]);
+
+        uint64_t deviceLocal = 0;
+        for (uint32_t h = 0; h < mem.memoryHeapCount; ++h)
+            if (mem.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                deviceLocal += mem.memoryHeaps[h].size;
+
+        infos.push_back({
+            .index             = i,
+            .name              = props.deviceName,
+            .type              = (DEVICE_TYPE)props.deviceType,
+            .vendorID          = props.vendorID,
+            .deviceID          = props.deviceID,
+            .apiVersion        = props.apiVersion,
+            .driverVersion     = props.driverVersion,
+            .deviceLocalMemory = deviceLocal,
+        });
+    }
+    return infos;
+}
+
 
 struct PNextChain {
     void* head = nullptr;

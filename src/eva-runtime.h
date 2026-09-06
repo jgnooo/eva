@@ -281,6 +281,21 @@ enum class OwnershipTransferOpType {
 };
 
 
+// One physical GPU as the instance sees it, before any logical device is
+// created on it. `index` is the vkEnumeratePhysicalDevices position, i.e.
+// the value DeviceSettings::physicalDeviceIndex expects.
+struct PhysicalDeviceInfo {
+    uint32_t    index;
+    std::string name;
+    DEVICE_TYPE type;
+    uint32_t    vendorID;
+    uint32_t    deviceID;
+    uint32_t    apiVersion;         // VK_API_VERSION_* packed
+    uint32_t    driverVersion;      // vendor-specific packing
+    uint64_t    deviceLocalMemory;  // bytes, sum of DEVICE_LOCAL heaps
+};
+
+
 class Runtime {
     VULKAN_CLASS_COMMON
     ~Runtime();
@@ -294,6 +309,10 @@ public:
     uint32_t deviceCount() const;
     Device device(int gpuIndex=-1); 
     Device device(DeviceSettings settings);
+    // Every physical device visible to the instance, in enumeration order.
+    // Cheap to call and creates nothing, so a front-end can list GPUs
+    // before deciding which one to open.
+    std::vector<PhysicalDeviceInfo> physicalDevices() const;
 
 #ifdef EVA_ENABLE_WINDOW
     Window createWindow(WindowCreateInfo info);
